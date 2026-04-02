@@ -160,20 +160,34 @@ impl Default for ScoringConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SimulationConfig {
     #[serde(default = "default_follow_delay_secs")]
     pub follow_delay_secs: u64,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: f64,
+    #[serde(default = "default_impact_slippage_bps")]
+    pub impact_slippage_bps: f64,
     #[serde(default = "default_wallet_scale")]
     pub wallet_scale: f64,
     #[serde(default = "default_max_trade_usdc")]
     pub max_trade_usdc: f64,
     #[serde(default = "default_minimum_trade_usdc")]
     pub minimum_trade_usdc: f64,
+    #[serde(default = "default_min_leader_trade_usdc")]
+    pub min_leader_trade_usdc: f64,
     #[serde(default = "default_starting_cash")]
     pub starting_cash: f64,
+    #[serde(default = "default_cash_reserve_ratio")]
+    pub cash_reserve_ratio: f64,
+    #[serde(default = "default_max_total_exposure_ratio")]
+    pub max_total_exposure_ratio: f64,
+    #[serde(default = "default_max_position_exposure_ratio")]
+    pub max_position_exposure_ratio: f64,
+    #[serde(default = "default_max_wallet_exposure_ratio")]
+    pub max_wallet_exposure_ratio: f64,
+    #[serde(default = "default_max_open_positions")]
+    pub max_open_positions: usize,
 }
 
 impl Default for SimulationConfig {
@@ -181,10 +195,17 @@ impl Default for SimulationConfig {
         Self {
             follow_delay_secs: default_follow_delay_secs(),
             slippage_bps: default_slippage_bps(),
+            impact_slippage_bps: default_impact_slippage_bps(),
             wallet_scale: default_wallet_scale(),
             max_trade_usdc: default_max_trade_usdc(),
             minimum_trade_usdc: default_minimum_trade_usdc(),
+            min_leader_trade_usdc: default_min_leader_trade_usdc(),
             starting_cash: default_starting_cash(),
+            cash_reserve_ratio: default_cash_reserve_ratio(),
+            max_total_exposure_ratio: default_max_total_exposure_ratio(),
+            max_position_exposure_ratio: default_max_position_exposure_ratio(),
+            max_wallet_exposure_ratio: default_max_wallet_exposure_ratio(),
+            max_open_positions: default_max_open_positions(),
         }
     }
 }
@@ -220,6 +241,8 @@ pub struct StorageConfig {
     pub persist_snapshots: bool,
     #[serde(default = "default_persist_activity")]
     pub persist_activity: bool,
+    #[serde(default = "default_persist_paper_account")]
+    pub persist_paper_account: bool,
 }
 
 impl Default for StorageConfig {
@@ -228,6 +251,7 @@ impl Default for StorageConfig {
             data_dir: default_data_dir(),
             persist_snapshots: default_persist_snapshots(),
             persist_activity: default_persist_activity(),
+            persist_paper_account: default_persist_paper_account(),
         }
     }
 }
@@ -364,6 +388,10 @@ fn default_slippage_bps() -> f64 {
     35.0
 }
 
+fn default_impact_slippage_bps() -> f64 {
+    20.0
+}
+
 fn default_wallet_scale() -> f64 {
     0.10
 }
@@ -373,11 +401,35 @@ fn default_max_trade_usdc() -> f64 {
 }
 
 fn default_minimum_trade_usdc() -> f64 {
-    5.0
+    2.0
+}
+
+fn default_min_leader_trade_usdc() -> f64 {
+    0.0
 }
 
 fn default_starting_cash() -> f64 {
     100.0
+}
+
+fn default_cash_reserve_ratio() -> f64 {
+    0.10
+}
+
+fn default_max_total_exposure_ratio() -> f64 {
+    0.90
+}
+
+fn default_max_position_exposure_ratio() -> f64 {
+    0.35
+}
+
+fn default_max_wallet_exposure_ratio() -> f64 {
+    0.50
+}
+
+fn default_max_open_positions() -> usize {
+    6
 }
 
 fn default_poll_interval_secs() -> u64 {
@@ -431,6 +483,10 @@ fn default_persist_snapshots() -> bool {
 }
 
 fn default_persist_activity() -> bool {
+    true
+}
+
+fn default_persist_paper_account() -> bool {
     true
 }
 

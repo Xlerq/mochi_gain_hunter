@@ -288,6 +288,8 @@ pub struct WalletScorecard {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosedSimulationTrade {
+    pub source_wallet: Option<String>,
+    pub source_label: Option<String>,
     pub asset: String,
     pub title: Option<String>,
     pub buy_timestamp: i64,
@@ -300,6 +302,8 @@ pub struct ClosedSimulationTrade {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenSimulationPosition {
+    pub source_wallet: Option<String>,
+    pub source_label: Option<String>,
     pub asset: String,
     pub title: Option<String>,
     pub size: f64,
@@ -323,20 +327,44 @@ pub struct SimulationReport {
     pub starting_cash: f64,
     pub tracked_from_timestamp: Option<i64>,
     pub tracked_to_timestamp: Option<i64>,
+    pub deployed_cost_basis: f64,
+    pub deployed_market_value: f64,
+    pub cash_reserve_target: f64,
+    pub skip_reasons: Vec<SimulationSkipReasonCount>,
     pub open_positions: Vec<OpenSimulationPosition>,
     pub closed_positions: Vec<ClosedSimulationTrade>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationSkipReasonCount {
+    pub reason: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SimulationExecutionStatus {
+    Filled,
+    Partial,
+    Skipped,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioSimulationExecution {
     pub source_wallet: String,
     pub source_label: Option<String>,
     pub asset: String,
     pub title: Option<String>,
+    pub leader_timestamp: i64,
     pub timestamp: i64,
     pub side: TradeSide,
+    pub status: SimulationExecutionStatus,
+    pub requested_usdc: f64,
+    pub filled_usdc: f64,
     pub price: f64,
     pub usdc_size: f64,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -363,7 +391,14 @@ pub struct PortfolioSimulationReport {
     pub final_cash: f64,
     pub final_equity: f64,
     pub starting_cash: f64,
+    pub tracked_from_timestamp: Option<i64>,
+    pub tracked_to_timestamp: Option<i64>,
+    pub deployed_cost_basis: f64,
+    pub deployed_market_value: f64,
+    pub cash_reserve_target: f64,
+    pub skip_reasons: Vec<SimulationSkipReasonCount>,
     pub open_positions: Vec<PortfolioSimulationPosition>,
+    pub closed_positions: Vec<ClosedSimulationTrade>,
     pub recent_executions: Vec<PortfolioSimulationExecution>,
 }
 

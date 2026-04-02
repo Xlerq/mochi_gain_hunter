@@ -49,6 +49,23 @@ Wallet actions from the app let you:
 - add/remove it from the watchlist
 - start or stop paper-following without editing config by hand
 
+## Paper Model
+
+The paper account is no longer a simple optimistic replay. It now tries to behave more
+like a live follower:
+
+- uses one shared bankroll across all enabled wallets
+- applies delayed pending orders instead of immediate fills
+- aggregates micro leader buys into executable follower-sized orders for small accounts
+- cancels or shrinks buys if the leader unwinds before our delayed fill
+- enforces a cash reserve, total exposure cap, per-wallet cap, per-position cap, and max open positions
+- applies base slippage plus additional size-based impact slippage
+- records skipped and partial-fill reasons so you can see why trades were not copied cleanly
+
+This is still an approximation. Without historical order book depth, exact queue position,
+and real-time market snapshots, it cannot perfectly reproduce live fills. It is materially
+closer than the previous model, but it is not a guarantee of live execution quality.
+
 ## Debug Commands
 
 Initialize a local config file:
@@ -112,9 +129,26 @@ The monitor now persists tracking data under `data/`:
 - `data/history/`: refresh snapshots
 - `data/latest/`: latest report per wallet
 - `data/activities/`: appended trade activity logs used by backtesting
+- `data/paper_account/latest.json`: latest shared paper-account snapshot
+- `data/paper_account/history/shared_account.jsonl`: paper-account history for long-running use
+- `data/paper_account/forward_state.json`: resumable forward-only paper state
+- `data/paper_account/history/journal.jsonl`: append-only paper execution journal
 
 The main app now includes a shared paper simulation that uses one bankroll across all
 watchlist wallets with `paper_follow_enabled = true`.
+
+## 24/7 Use
+
+The app is now better suited for long-running use because the shared paper account no longer
+needs a full replay on each refresh. It persists a resumable forward-only journal and advances
+from locally stored wallet activity, with a small overlap window to avoid missing edge-case
+events around restarts.
+
+Practical next moves:
+
+1. run it under `tmux`, `screen`, or a user service so it survives terminal disconnects
+2. add alerting for new copied, skipped, and partial trades
+3. add a dedicated background/service mode so the same engine can run without the full TUI open
 
 ## Near-Term Plan
 

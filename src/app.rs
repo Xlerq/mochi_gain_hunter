@@ -20,12 +20,19 @@ use crate::config::{AppConfig, WatchedWalletConfig};
 use crate::domain::{
     FollowRecommendation, LeaderboardCategory, LeaderboardEntry, LeaderboardOrderBy,
     LeaderboardTimePeriod, PortfolioSimulationExecution, PortfolioSimulationPosition,
-    PortfolioSimulationReport, TradeSide, WalletActivity, WalletActivityType, WalletReport,
+    PortfolioSimulationReport, SimulationExecutionStatus, TradeSide, WalletActivity,
+    WalletActivityType, WalletReport,
 };
 use crate::polymarket::PolymarketClient;
 use crate::reporting::{WalletAnalysis, build_wallet_analysis, build_wallet_report};
-use crate::simulation::{SharedSimulationInput, simulate_shared_copy_trading};
-use crate::storage::persist_wallet_tracking;
+use crate::simulation::{
+    ForwardPaperJournalMetadata, SharedSimulationInput, advance_forward_paper_journal,
+    can_resume_forward_paper_journal,
+};
+use crate::storage::{
+    load_activity_log, load_activity_log_since, load_forward_paper_journal,
+    persist_forward_paper_journal, persist_paper_account, persist_wallet_tracking,
+};
 
 const LEADERBOARD_CATEGORIES: [LeaderboardCategory; 3] = [
     LeaderboardCategory::Politics,
@@ -40,6 +47,7 @@ const LEADERBOARD_TIME_PERIODS: [LeaderboardTimePeriod; 4] = [
 ];
 const LEADERBOARD_ORDERINGS: [LeaderboardOrderBy; 2] =
     [LeaderboardOrderBy::Pnl, LeaderboardOrderBy::Vol];
+const FORWARD_JOURNAL_OVERLAP_SECONDS: i64 = 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppTab {
@@ -112,6 +120,8 @@ struct PaperDashboard {
     summary: PortfolioSimulationReport,
     wallets: Vec<PaperWalletRow>,
     recent_executions: Vec<PortfolioSimulationExecution>,
+    processed_activity_count: usize,
+    resumed_journal: bool,
 }
 
 impl PaperDashboard {
@@ -128,11 +138,20 @@ impl PaperDashboard {
                 final_cash: starting_cash,
                 final_equity: starting_cash,
                 starting_cash,
+                tracked_from_timestamp: None,
+                tracked_to_timestamp: None,
+                deployed_cost_basis: 0.0,
+                deployed_market_value: 0.0,
+                cash_reserve_target: 0.0,
+                skip_reasons: Vec::new(),
                 open_positions: Vec::new(),
+                closed_positions: Vec::new(),
                 recent_executions: Vec::new(),
             },
             wallets: Vec::new(),
             recent_executions: Vec::new(),
+            processed_activity_count: 0,
+            resumed_journal: false,
         }
     }
 }
@@ -444,14 +463,29 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
 
     state.watchlist_rows = rows;
     state.watchlist_selected = move_index(state.watchlist_selected, state.watchlist_rows.len(), 0);
-    state.paper_dashboard = build_paper_dashboard(&state.watchlist_rows, &state.config);
+    state.paper_dashboard = build_paper_dashboard(&state.watchlist_rows, &state.config)?;
     state.last_refresh_timestamp = Some(now_ts());
     state.status_message = if state.watchlist_rows.is_empty() {
         "watchlist is empty".to_owned()
+    } else if !state
+        .watchlist_rows
+        .iter()
+        .any(|row| row.paper_follow_enabled)
+    {
+        format!(
+            "watchlist refreshed: {} wallet(s) | paper follow disabled",
+            state.watchlist_rows.len()
+        )
     } else {
         format!(
-            "watchlist refreshed: {} wallet(s)",
-            state.watchlist_rows.len()
+            "watchlist refreshed: {} wallet(s) | paper {} | {} new trade(s)",
+            state.watchlist_rows.len(),
+            if state.paper_dashboard.resumed_journal {
+                "resumed"
+            } else {
+                "rebuilt"
+            },
+            state.paper_dashboard.processed_activity_count
         )
     };
     state.refresh_watchlist = false;
@@ -524,23 +558,73 @@ async fn refresh_leaderboard(client: &PolymarketClient, state: &mut AppState) ->
     Ok(())
 }
 
-fn build_paper_dashboard(rows: &[WatchedWalletRow], config: &AppConfig) -> PaperDashboard {
-    let inputs = rows
+fn build_paper_dashboard(rows: &[WatchedWalletRow], config: &AppConfig) -> Result<PaperDashboard> {
+    let enabled_rows = rows
         .iter()
         .filter(|row| row.paper_follow_enabled)
-        .map(|row| SharedSimulationInput {
-            source_wallet: row.wallet.clone(),
-            source_label: Some(row.label.clone()),
-            activities: row.analysis.activities.clone(),
-            current_marks: row.analysis.current_marks.clone(),
-        })
         .collect::<Vec<_>>();
 
-    if inputs.is_empty() {
-        return PaperDashboard::empty(config.simulation.starting_cash);
+    if enabled_rows.is_empty() {
+        return Ok(PaperDashboard::empty(config.simulation.starting_cash));
     }
 
-    let summary = simulate_shared_copy_trading(&inputs, &config.simulation);
+    let metadata = ForwardPaperJournalMetadata {
+        enabled_wallets: enabled_rows
+            .iter()
+            .map(|row| row.wallet.clone())
+            .collect::<Vec<_>>(),
+        simulation_config: config.simulation.clone(),
+    };
+    let previous_journal = load_forward_paper_journal(config)?;
+    let resumable = can_resume_forward_paper_journal(previous_journal.as_ref(), &metadata);
+    let journal_start_timestamp = if resumable {
+        previous_journal
+            .as_ref()
+            .and_then(|journal| journal.tracked_to_timestamp)
+            .map(|timestamp| timestamp.saturating_sub(FORWARD_JOURNAL_OVERLAP_SECONDS))
+    } else {
+        None
+    };
+
+    let inputs = if resumable {
+        let mut incremental_inputs = Vec::with_capacity(enabled_rows.len());
+        for row in &enabled_rows {
+            let activities = if let Some(start_timestamp) = journal_start_timestamp {
+                load_activity_log_since(config, &row.wallet, start_timestamp)?
+            } else {
+                load_activity_log(config, &row.wallet)?
+            };
+            incremental_inputs.push(SharedSimulationInput {
+                source_wallet: row.wallet.clone(),
+                source_label: Some(row.label.clone()),
+                activities,
+                current_marks: row.analysis.current_marks.clone(),
+            });
+        }
+        incremental_inputs
+    } else {
+        let mut full_history_inputs = Vec::with_capacity(enabled_rows.len());
+        for row in &enabled_rows {
+            full_history_inputs.push(SharedSimulationInput {
+                source_wallet: row.wallet.clone(),
+                source_label: Some(row.label.clone()),
+                activities: load_activity_log(config, &row.wallet)?,
+                current_marks: row.analysis.current_marks.clone(),
+            });
+        }
+        full_history_inputs
+    };
+
+    let progress = advance_forward_paper_journal(
+        previous_journal,
+        &inputs,
+        metadata,
+        &config.simulation,
+        now_ts(),
+    );
+    persist_forward_paper_journal(config, &progress.state, &progress.new_executions)?;
+    persist_paper_account(config, &progress.report)?;
+
     let mut wallets = rows
         .iter()
         .filter(|row| row.paper_follow_enabled)
@@ -558,11 +642,13 @@ fn build_paper_dashboard(rows: &[WatchedWalletRow], config: &AppConfig) -> Paper
         .collect::<Vec<_>>();
     wallets.sort_by(|left, right| right.total_pnl.total_cmp(&left.total_pnl));
 
-    PaperDashboard {
-        recent_executions: summary.recent_executions.clone(),
-        summary,
+    Ok(PaperDashboard {
+        recent_executions: progress.report.recent_executions.clone(),
+        summary: progress.report,
         wallets,
-    }
+        processed_activity_count: progress.processed_activity_count,
+        resumed_journal: progress.resumed,
+    })
 }
 
 fn build_action_menu(state: &AppState, context: SelectionContext) -> ActionMenuState {
@@ -994,7 +1080,7 @@ fn draw_wallet_tab(frame: &mut Frame, area: Rect, state: &AppState) {
 fn draw_paper_tab(frame: &mut Frame, area: Rect, state: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(10)])
+        .constraints([Constraint::Length(10), Constraint::Min(10)])
         .split(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -1452,6 +1538,16 @@ fn draw_wallet_closed_trades(detail: &WalletDetail) -> Paragraph<'static> {
 
 fn draw_paper_summary(state: &AppState) -> Paragraph<'static> {
     let summary = &state.paper_dashboard.summary;
+    let top_reason = summary
+        .skip_reasons
+        .first()
+        .map(|reason| format!("{} x{}", reason.reason, reason.count))
+        .unwrap_or_else(|| "none".to_owned());
+    let journal_mode = if state.paper_dashboard.resumed_journal {
+        "resumed"
+    } else {
+        "rebuilt"
+    };
     Paragraph::new(vec![
         Line::from(format!(
             "shared bankroll {:.2} | tracked wallets {}",
@@ -1466,8 +1562,8 @@ fn draw_paper_summary(state: &AppState) -> Paragraph<'static> {
             summary.final_cash, summary.final_equity
         )),
         Line::from(format!(
-            "realized {:.2} | unrealized {:.2}",
-            summary.realized_pnl, summary.unrealized_pnl
+            "deployed {:.2} | marked {:.2}",
+            summary.deployed_cost_basis, summary.deployed_market_value
         )),
         Line::from(vec![
             Span::raw("total pnl "),
@@ -1475,8 +1571,26 @@ fn draw_paper_summary(state: &AppState) -> Paragraph<'static> {
                 format!("{:.2}", summary.total_pnl),
                 pnl_style(summary.total_pnl),
             ),
-            Span::raw(format!(" | open {}", summary.open_positions.len())),
+            Span::raw(format!(" | reserve {:.2}", summary.cash_reserve_target)),
         ]),
+        Line::from(format!(
+            "realized {:.2} | unrealized {:.2}",
+            summary.realized_pnl, summary.unrealized_pnl
+        )),
+        Line::from(format!(
+            "open {} | friction {}",
+            summary.open_positions.len(),
+            truncate_text(&top_reason, 48)
+        )),
+        Line::from(format!(
+            "journal {} | new activity {}",
+            journal_mode, state.paper_dashboard.processed_activity_count
+        )),
+        Line::from(format!(
+            "tracked {} -> {}",
+            opt_timestamp(summary.tracked_from_timestamp),
+            opt_timestamp(summary.tracked_to_timestamp)
+        )),
     ])
     .block(
         Block::default()
@@ -1557,7 +1671,7 @@ fn draw_paper_positions(state: &AppState) -> Paragraph<'static> {
 fn draw_paper_executions(state: &AppState) -> Paragraph<'static> {
     let executions = &state.paper_dashboard.recent_executions;
     let lines = if executions.is_empty() {
-        vec![Line::from("No simulated executions yet.")]
+        vec![Line::from("No paper-account decisions yet.")]
     } else {
         executions
             .iter()
@@ -1569,7 +1683,7 @@ fn draw_paper_executions(state: &AppState) -> Paragraph<'static> {
     Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Recent Simulated Executions")
+                .title("Recent Paper Decisions")
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: true })
@@ -1673,10 +1787,12 @@ fn format_portfolio_position(position: &PortfolioSimulationPosition) -> Line<'st
         .source_label
         .clone()
         .unwrap_or_else(|| shorten_wallet(&position.source_wallet));
+    let market_value = position.size * position.mark_price;
     Line::from(vec![
         Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" "),
         Span::raw(format!("{:.2} ", position.size)),
+        Span::raw(format!("val {:.2} ", market_value)),
         Span::styled(
             format!("pnl {:.2} ", position.unrealized_pnl),
             pnl_style(position.unrealized_pnl),
@@ -1693,6 +1809,13 @@ fn format_execution_line(execution: &PortfolioSimulationExecution) -> Line<'stat
         .source_label
         .clone()
         .unwrap_or_else(|| shorten_wallet(&execution.source_wallet));
+    let status_style = match execution.status {
+        SimulationExecutionStatus::Filled => Style::default().fg(Color::Green),
+        SimulationExecutionStatus::Partial => Style::default().fg(Color::Yellow),
+        SimulationExecutionStatus::Skipped | SimulationExecutionStatus::Canceled => {
+            Style::default().fg(Color::Red)
+        }
+    };
     Line::from(vec![
         Span::styled(
             format!("[{}] ", execution.timestamp),
@@ -1708,16 +1831,22 @@ fn format_execution_line(execution: &PortfolioSimulationExecution) -> Line<'stat
                 Style::default().fg(Color::Red)
             },
         ),
+        Span::styled(
+            format!("{:?} ", execution.status).to_uppercase(),
+            status_style,
+        ),
         Span::raw(format!(
-            "${:.2} @ {:.4} ",
-            execution.usdc_size, execution.price
+            "{:.2}/{:.2} @ {:.4} ",
+            execution.filled_usdc, execution.requested_usdc, execution.price
         )),
         Span::raw(truncate_text(
-            execution
-                .title
-                .as_deref()
-                .unwrap_or(execution.asset.as_str()),
-            42,
+            execution.reason.as_deref().unwrap_or_else(|| {
+                execution
+                    .title
+                    .as_deref()
+                    .unwrap_or(execution.asset.as_str())
+            }),
+            36,
         )),
     ])
 }
