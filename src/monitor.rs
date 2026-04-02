@@ -49,11 +49,15 @@ struct WalletMonitorRow {
     realized_pnl_total: f64,
     open_pnl_total: f64,
     top_position_ratio: f64,
-    focus_trade_count: usize,
+    tracked_trade_count: usize,
+    paper_followed_trades: usize,
+    paper_closed_trades: usize,
+    paper_final_cash: f64,
+    paper_final_equity: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct FocusTradeEvent {
+struct RecentTradeEvent {
     label: String,
     wallet: String,
     timestamp: i64,
@@ -65,19 +69,33 @@ struct FocusTradeEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct PaperBookSummary {
+    wallet_count: usize,
+    total_followed_trades: usize,
+    total_closed_trades: usize,
+    total_open_positions: usize,
+    total_realized_pnl: f64,
+    total_unrealized_pnl: f64,
+    total_pnl: f64,
+    total_final_cash: f64,
+    total_final_equity: f64,
+    total_starting_cash: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct MonitorSnapshot {
     bankroll: f64,
     poll_interval_secs: u64,
-    focus_keywords: Vec<String>,
     last_refresh_timestamp: Option<i64>,
+    paper_book: PaperBookSummary,
     wallets: Vec<WalletMonitorRow>,
-    recent_focus_trades: Vec<FocusTradeEvent>,
+    recent_trades: Vec<RecentTradeEvent>,
 }
 
 struct MonitorState {
     snapshot: MonitorSnapshot,
     seen_activity_ids: HashSet<String>,
-    recent_focus_trades: VecDeque<FocusTradeEvent>,
+    recent_trades: VecDeque<RecentTradeEvent>,
     selected_wallet: usize,
     status_message: String,
 }
@@ -88,13 +106,24 @@ impl MonitorState {
             snapshot: MonitorSnapshot {
                 bankroll: config.simulation.starting_cash,
                 poll_interval_secs: config.monitor.poll_interval_secs,
-                focus_keywords: config.monitor.focus_keywords.clone(),
                 last_refresh_timestamp: None,
+                paper_book: PaperBookSummary {
+                    wallet_count: 0,
+                    total_followed_trades: 0,
+                    total_closed_trades: 0,
+                    total_open_positions: 0,
+                    total_realized_pnl: 0.0,
+                    total_unrealized_pnl: 0.0,
+                    total_pnl: 0.0,
+                    total_final_cash: 0.0,
+                    total_final_equity: 0.0,
+                    total_starting_cash: 0.0,
+                },
                 wallets: Vec::new(),
-                recent_focus_trades: Vec::new(),
+                recent_trades: Vec::new(),
             },
             seen_activity_ids: HashSet::new(),
-            recent_focus_trades: VecDeque::new(),
+            recent_trades: VecDeque::new(),
             selected_wallet: 0,
             status_message: "starting monitor".to_owned(),
         }
@@ -223,6 +252,18 @@ async fn refresh_state(
     state: &mut MonitorState,
 ) -> Result<()> {
     let mut rows = Vec::with_capacity(watchlist.len());
+    let mut paper_book = PaperBookSummary {
+        wallet_count: watchlist.len(),
+        total_followed_trades: 0,
+        total_closed_trades: 0,
+        total_open_positions: 0,
+        total_realized_pnl: 0.0,
+        total_unrealized_pnl: 0.0,
+        total_pnl: 0.0,
+        total_final_cash: 0.0,
+        total_final_equity: 0.0,
+        total_starting_cash: 0.0,
+    };
 
     for watched in watchlist {
         let analysis = build_wallet_analysis(client, config, &watched.wallet, None).await?;
@@ -233,13 +274,12 @@ async fn refresh_state(
             .or_else(|| report.scorecard.user_name.clone())
             .unwrap_or_else(|| shorten_wallet(&watched.wallet));
 
-        let focus_trade_count = record_focus_trades(
+        let tracked_trade_count = record_recent_trades(
             &mut state.seen_activity_ids,
-            &mut state.recent_focus_trades,
+            &mut state.recent_trades,
             &label,
             &watched.wallet,
             &analysis.activities,
-            &config.monitor.focus_keywords,
             config.monitor.recent_events_limit,
         );
 
@@ -254,14 +294,25 @@ async fn refresh_state(
             &label,
             &watched.wallet,
             &report,
-            focus_trade_count,
+            tracked_trade_count,
         ));
+
+        paper_book.total_followed_trades += report.simulation.followed_trades;
+        paper_book.total_closed_trades += report.simulation.closed_trades;
+        paper_book.total_open_positions += report.simulation.open_positions.len();
+        paper_book.total_realized_pnl += report.simulation.realized_pnl;
+        paper_book.total_unrealized_pnl += report.simulation.unrealized_pnl;
+        paper_book.total_pnl += report.simulation.total_pnl;
+        paper_book.total_final_cash += report.simulation.final_cash;
+        paper_book.total_final_equity += report.simulation.final_equity;
+        paper_book.total_starting_cash += report.simulation.starting_cash;
     }
 
     state.snapshot.last_refresh_timestamp = Some(now_ts());
+    state.snapshot.paper_book = paper_book;
     state.snapshot.wallets = rows;
-    sort_recent_focus_trades(&mut state.recent_focus_trades);
-    state.snapshot.recent_focus_trades = state.recent_focus_trades.iter().cloned().collect();
+    sort_recent_trades(&mut state.recent_trades);
+    state.snapshot.recent_trades = state.recent_trades.iter().cloned().collect();
     if state.selected_wallet >= state.snapshot.wallets.len() {
         state.selected_wallet = state.snapshot.wallets.len().saturating_sub(1);
     }
@@ -313,7 +364,7 @@ fn wallet_row_from_report(
     label: &str,
     wallet: &str,
     report: &WalletReport,
-    focus_trade_count: usize,
+    tracked_trade_count: usize,
 ) -> WalletMonitorRow {
     WalletMonitorRow {
         label: label.to_owned(),
@@ -335,32 +386,34 @@ fn wallet_row_from_report(
         realized_pnl_total: report.scorecard.aggregates.realized_pnl_total,
         open_pnl_total: report.scorecard.aggregates.open_pnl_total,
         top_position_ratio: report.scorecard.aggregates.top_position_ratio,
-        focus_trade_count,
+        tracked_trade_count,
+        paper_followed_trades: report.simulation.followed_trades,
+        paper_closed_trades: report.simulation.closed_trades,
+        paper_final_cash: report.simulation.final_cash,
+        paper_final_equity: report.simulation.final_equity,
     }
 }
 
-fn record_focus_trades(
+fn record_recent_trades(
     seen_activity_ids: &mut HashSet<String>,
-    recent_focus_trades: &mut VecDeque<FocusTradeEvent>,
+    recent_trades: &mut VecDeque<RecentTradeEvent>,
     label: &str,
     wallet: &str,
     activities: &[WalletActivity],
-    focus_keywords: &[String],
     recent_limit: usize,
 ) -> usize {
-    let mut focus_matches = activities
+    let mut recent_matches = activities
         .iter()
         .filter(|activity| matches!(activity.activity_type, WalletActivityType::Trade))
         .filter(|activity| matches!(activity.side, Some(TradeSide::Buy | TradeSide::Sell)))
-        .filter(|activity| matches_focus(activity, focus_keywords))
         .collect::<Vec<_>>();
 
-    focus_matches.sort_by_key(|activity| activity.timestamp);
+    recent_matches.sort_by_key(|activity| activity.timestamp);
 
-    for activity in &focus_matches {
+    for activity in &recent_matches {
         let activity_id = activity_id(wallet, activity);
         if seen_activity_ids.insert(activity_id) {
-            recent_focus_trades.push_front(FocusTradeEvent {
+            recent_trades.push_front(RecentTradeEvent {
                 label: label.to_owned(),
                 wallet: wallet.to_owned(),
                 timestamp: activity.timestamp,
@@ -377,30 +430,11 @@ fn record_focus_trades(
         }
     }
 
-    while recent_focus_trades.len() > recent_limit {
-        recent_focus_trades.pop_back();
+    while recent_trades.len() > recent_limit {
+        recent_trades.pop_back();
     }
 
-    focus_matches.len()
-}
-
-fn matches_focus(activity: &WalletActivity, focus_keywords: &[String]) -> bool {
-    if focus_keywords.is_empty() {
-        return true;
-    }
-
-    let haystack = [
-        activity.title.as_deref().unwrap_or_default(),
-        activity.slug.as_deref().unwrap_or_default(),
-        activity.event_slug.as_deref().unwrap_or_default(),
-        activity.outcome.as_deref().unwrap_or_default(),
-    ]
-    .join(" ")
-    .to_ascii_lowercase();
-
-    focus_keywords
-        .iter()
-        .any(|keyword| haystack.contains(&keyword.to_ascii_lowercase()))
+    recent_matches.len()
 }
 
 fn activity_id(wallet: &str, activity: &WalletActivity) -> String {
@@ -459,10 +493,10 @@ fn now_ts() -> i64 {
         .unwrap_or_default()
 }
 
-fn sort_recent_focus_trades(recent_focus_trades: &mut VecDeque<FocusTradeEvent>) {
-    let mut items = recent_focus_trades.drain(..).collect::<Vec<_>>();
+fn sort_recent_trades(recent_trades: &mut VecDeque<RecentTradeEvent>) {
+    let mut items = recent_trades.drain(..).collect::<Vec<_>>();
     items.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-    *recent_focus_trades = items.into();
+    *recent_trades = items.into();
 }
 
 fn draw_dashboard(frame: &mut Frame, state: &MonitorState) {
@@ -481,19 +515,24 @@ fn draw_dashboard(frame: &mut Frame, state: &MonitorState) {
     let detail_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),
+            Constraint::Length(11),
             Constraint::Percentage(50),
             Constraint::Percentage(50),
         ])
         .split(body[1]);
+    let summary_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(detail_area[0]);
 
     let selected_summary = draw_selected_wallet_summary(selected_wallet);
+    let paper_book = draw_paper_book_summary(&state.snapshot.paper_book);
     let selected_trades =
         draw_selected_trades(state, selected_wallet.map(|wallet| wallet.wallet.as_str()));
     let global_trades = draw_global_trades(state);
 
     let footer = Paragraph::new(format!(
-        "q quit | r refresh | j/k or arrows move | g/G first/last | bankroll ${:.2} | poll {}s | last refresh {} | {}",
+        "q quit | r refresh | j/k or arrows move | g/G first/last | per-wallet bankroll ${:.2} | poll {}s | last refresh {} | {}",
         state.snapshot.bankroll,
         state.snapshot.poll_interval_secs,
         state
@@ -512,7 +551,8 @@ fn draw_dashboard(frame: &mut Frame, state: &MonitorState) {
         state.selected_wallet,
         state.snapshot.wallets.len(),
     );
-    frame.render_widget(selected_summary, detail_area[0]);
+    frame.render_widget(selected_summary, summary_row[0]);
+    frame.render_widget(paper_book, summary_row[1]);
     frame.render_widget(selected_trades, detail_area[1]);
     frame.render_widget(global_trades, detail_area[2]);
     frame.render_widget(footer, layout[1]);
@@ -628,15 +668,22 @@ fn draw_selected_wallet_summary(selected_wallet: Option<&WalletMonitorRow>) -> P
         ]),
         Line::from(format!("wallet: {}", wallet.wallet)),
         Line::from(vec![Span::raw(format!(
-            "reco {} | avg trade ${:.2} | win rate {:.1}% | focus trades {}",
+            "reco {} | avg trade ${:.2} | win rate {:.1}% | tracked trades {}",
             wallet.recommendation,
             wallet.average_trade_usdc,
             wallet.win_rate * 100.0,
-            wallet.focus_trade_count
+            wallet.tracked_trade_count
         ))]),
         Line::from(vec![Span::raw(format!(
             "realized {:.2} | open {:.2} | concentration {:.2}",
             wallet.realized_pnl_total, wallet.open_pnl_total, wallet.top_position_ratio
+        ))]),
+        Line::from(vec![Span::raw(format!(
+            "paper trades {} / {} | cash {:.2} | equity {:.2}",
+            wallet.paper_followed_trades,
+            wallet.paper_closed_trades,
+            wallet.paper_final_cash,
+            wallet.paper_final_equity
         ))]),
         Line::from(vec![
             Span::raw("paper-follow pnl "),
@@ -655,12 +702,48 @@ fn draw_selected_wallet_summary(selected_wallet: Option<&WalletMonitorRow>) -> P
         .wrap(Wrap { trim: true })
 }
 
+fn draw_paper_book_summary(paper_book: &PaperBookSummary) -> Paragraph<'static> {
+    let pnl_style = if paper_book.total_pnl >= 0.0 {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    };
+
+    Paragraph::new(vec![
+        Line::from(format!(
+            "wallets {} | open {}",
+            paper_book.wallet_count, paper_book.total_open_positions
+        )),
+        Line::from(format!(
+            "paper trades {} / {}",
+            paper_book.total_followed_trades, paper_book.total_closed_trades
+        )),
+        Line::from(format!(
+            "cash {:.2} | equity {:.2}",
+            paper_book.total_final_cash, paper_book.total_final_equity
+        )),
+        Line::from(format!(
+            "realized {:.2} | unrealized {:.2}",
+            paper_book.total_realized_pnl, paper_book.total_unrealized_pnl
+        )),
+        Line::from(vec![
+            Span::raw("total pnl "),
+            Span::styled(format!("{:.2}", paper_book.total_pnl), pnl_style),
+            Span::raw(format!(" | start {:.2}", paper_book.total_starting_cash)),
+        ]),
+    ])
+    .block(Block::default().title("Paper Book").borders(Borders::ALL))
+    .wrap(Wrap { trim: true })
+}
+
 fn draw_selected_trades(state: &MonitorState, wallet: Option<&str>) -> Paragraph<'static> {
     let lines = filtered_trade_lines(state, wallet, 12);
     Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Selected Wallet Focus Trades")
+                .title("Selected Wallet Recent Trades")
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: true })
@@ -671,7 +754,7 @@ fn draw_global_trades(state: &MonitorState) -> Paragraph<'static> {
     Paragraph::new(lines)
         .block(
             Block::default()
-                .title("Global Recent Focus Trades")
+                .title("Global Recent Trades")
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: true })
@@ -684,7 +767,7 @@ fn filtered_trade_lines(
 ) -> Vec<Line<'static>> {
     let trades = state
         .snapshot
-        .recent_focus_trades
+        .recent_trades
         .iter()
         .filter(|trade| {
             wallet
@@ -695,7 +778,7 @@ fn filtered_trade_lines(
         .collect::<Vec<_>>();
 
     if trades.is_empty() {
-        return vec![Line::from("No focus-matching trades yet.")];
+        return vec![Line::from("No recent trades captured yet.")];
     }
 
     trades

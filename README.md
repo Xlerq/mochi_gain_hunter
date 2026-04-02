@@ -76,9 +76,9 @@ dashboard.
 The Ratatui monitor is now a multi-pane dashboard:
 
 - left pane: watched wallets with score, recommendation, and simulated PnL
-- top-right: selected wallet summary and gating status
-- middle-right: recent focus-matching trades for the selected wallet
-- bottom-right: global focus trade feed across the watchlist
+- top-right: selected wallet summary plus a paper-book summary
+- middle-right: recent trades for the selected wallet
+- bottom-right: global recent trade feed across the watchlist
 
 Controls:
 
@@ -94,6 +94,11 @@ The monitor now persists tracking data under `data/`:
 - `data/history/`: refresh snapshots
 - `data/latest/`: latest report per wallet
 - `data/activities/`: appended trade activity logs used by backtesting
+
+Current caveat:
+
+- the paper-book summary currently aggregates a separate paper bankroll per watched wallet
+- it is useful for wallet comparison, but it is not yet a single shared-account simulator
 
 ## Near-Term Plan
 
