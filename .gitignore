@@ -1,2 +1,8 @@
 .DS_Store
 Thumbs.db
+/target
+/.env
+/.env.*
+/data
+/logs
+*.db
