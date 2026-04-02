@@ -9,6 +9,7 @@ use crate::polymarket::PolymarketClient;
 use crate::scoring::score_wallet;
 use crate::simulation::simulate_copy_trading;
 
+#[derive(Debug, Clone)]
 pub struct WalletAnalysis {
     pub report: WalletReport,
     pub activities: Vec<WalletActivity>,

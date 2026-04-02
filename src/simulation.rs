@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use crate::config::SimulationConfig;
 use crate::domain::{
-    ClosedSimulationTrade, OpenSimulationPosition, SimulationReport, TradeSide, WalletActivity,
-    WalletActivityType,
+    ClosedSimulationTrade, OpenSimulationPosition, PortfolioSimulationExecution,
+    PortfolioSimulationPosition, PortfolioSimulationReport, SimulationReport, TradeSide,
+    WalletActivity, WalletActivityType,
 };
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,26 @@ struct PositionState {
     avg_entry_price: f64,
     last_mark_price: f64,
     last_buy_timestamp: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedSimulationInput {
+    pub source_wallet: String,
+    pub source_label: Option<String>,
+    pub activities: Vec<WalletActivity>,
+    pub current_marks: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SharedPositionState {
+    source_wallet: String,
+    source_label: Option<String>,
+    asset: String,
+    title: Option<String>,
+    leader_size: f64,
+    follower_size: f64,
+    avg_entry_price: f64,
+    last_mark_price: f64,
 }
 
 pub fn simulate_copy_trading(
@@ -205,6 +226,218 @@ pub fn simulate_copy_trading(
     }
 }
 
+pub fn simulate_shared_copy_trading(
+    inputs: &[SharedSimulationInput],
+    config: &SimulationConfig,
+) -> PortfolioSimulationReport {
+    let mut current_marks = HashMap::new();
+    for input in inputs {
+        for (asset, price) in &input.current_marks {
+            current_marks.entry(asset.clone()).or_insert(*price);
+        }
+    }
+
+    let mut trade_activities = inputs
+        .iter()
+        .flat_map(|input| {
+            input
+                .activities
+                .iter()
+                .filter(|activity| matches!(activity.activity_type, WalletActivityType::Trade))
+                .filter(|activity| {
+                    matches!(activity.side, Some(TradeSide::Buy | TradeSide::Sell))
+                        && activity.price > 0.0
+                        && activity.size > 0.0
+                })
+                .map(move |activity| {
+                    (
+                        input.source_wallet.clone(),
+                        input.source_label.clone(),
+                        activity.clone(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+
+    trade_activities.sort_by(|left, right| {
+        left.2
+            .timestamp
+            .cmp(&right.2.timestamp)
+            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| left.2.asset.cmp(&right.2.asset))
+    });
+
+    let mut cash = config.starting_cash;
+    let mut followed_trades = 0usize;
+    let mut ignored_trades = 0usize;
+    let mut realized_pnl = 0.0;
+    let mut recent_executions = Vec::new();
+    let mut open_positions: HashMap<(String, String), SharedPositionState> = HashMap::new();
+
+    for (source_wallet, source_label, activity) in trade_activities {
+        let Some(side) = activity.side else {
+            ignored_trades += 1;
+            continue;
+        };
+
+        let price = bounded_price(activity.price);
+        let position_key = (source_wallet.clone(), activity.asset.clone());
+
+        match side {
+            TradeSide::Buy => {
+                let target_usdc = (activity.usdc_size * config.wallet_scale)
+                    .min(config.max_trade_usdc)
+                    .min(cash);
+                if target_usdc < config.minimum_trade_usdc {
+                    ignored_trades += 1;
+                    continue;
+                }
+
+                let entry_price = bounded_price(apply_buy_slippage(price, config.slippage_bps));
+                let follower_size = target_usdc / entry_price;
+                let position =
+                    open_positions
+                        .entry(position_key)
+                        .or_insert_with(|| SharedPositionState {
+                            source_wallet: source_wallet.clone(),
+                            source_label: source_label.clone(),
+                            asset: activity.asset.clone(),
+                            title: activity.title.clone(),
+                            leader_size: 0.0,
+                            follower_size: 0.0,
+                            avg_entry_price: entry_price,
+                            last_mark_price: entry_price,
+                        });
+
+                let total_size = position.follower_size + follower_size;
+                let total_cost = (position.avg_entry_price * position.follower_size)
+                    + (entry_price * follower_size);
+                position.avg_entry_price = total_cost / total_size.max(f64::EPSILON);
+                position.follower_size = total_size;
+                position.leader_size += activity.size;
+                position.last_mark_price = current_marks
+                    .get(&activity.asset)
+                    .copied()
+                    .unwrap_or(entry_price);
+
+                cash -= target_usdc;
+                followed_trades += 1;
+                recent_executions.push(PortfolioSimulationExecution {
+                    source_wallet,
+                    source_label,
+                    asset: activity.asset,
+                    title: activity.title,
+                    timestamp: activity.timestamp + config.follow_delay_secs as i64,
+                    side,
+                    price: entry_price,
+                    usdc_size: target_usdc,
+                });
+            }
+            TradeSide::Sell => {
+                let Some(position) = open_positions.get_mut(&position_key) else {
+                    ignored_trades += 1;
+                    continue;
+                };
+                if position.leader_size <= 0.0 || position.follower_size <= 0.0 {
+                    ignored_trades += 1;
+                    continue;
+                }
+
+                let leader_size_before = position.leader_size;
+                let sold_leader_size = activity.size.min(leader_size_before);
+                let sell_ratio = (sold_leader_size / leader_size_before).clamp(0.0, 1.0);
+                let sold_follower_size = position.follower_size * sell_ratio;
+                if sold_follower_size <= 0.0 {
+                    ignored_trades += 1;
+                    continue;
+                }
+
+                let exit_price = bounded_price(apply_sell_slippage(price, config.slippage_bps));
+                let proceeds = sold_follower_size * exit_price;
+                let cost_basis = sold_follower_size * position.avg_entry_price;
+                realized_pnl += proceeds - cost_basis;
+
+                position.follower_size -= sold_follower_size;
+                position.leader_size = (position.leader_size - sold_leader_size).max(0.0);
+                position.last_mark_price = current_marks
+                    .get(&activity.asset)
+                    .copied()
+                    .unwrap_or(exit_price);
+
+                cash += proceeds;
+                followed_trades += 1;
+                recent_executions.push(PortfolioSimulationExecution {
+                    source_wallet,
+                    source_label,
+                    asset: activity.asset,
+                    title: activity.title,
+                    timestamp: activity.timestamp + config.follow_delay_secs as i64,
+                    side,
+                    price: exit_price,
+                    usdc_size: proceeds,
+                });
+            }
+            TradeSide::Unknown => {
+                ignored_trades += 1;
+            }
+        }
+
+        open_positions.retain(|_, position| position.follower_size > 0.000_001);
+    }
+
+    let open_positions = open_positions
+        .into_values()
+        .map(|position| {
+            let mark_price = current_marks
+                .get(&position.asset)
+                .copied()
+                .unwrap_or(position.last_mark_price);
+            let unrealized_pnl = (mark_price - position.avg_entry_price) * position.follower_size;
+            PortfolioSimulationPosition {
+                source_wallet: position.source_wallet,
+                source_label: position.source_label,
+                asset: position.asset,
+                title: position.title,
+                size: position.follower_size,
+                avg_entry_price: position.avg_entry_price,
+                mark_price,
+                unrealized_pnl,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    recent_executions.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    recent_executions.truncate(18);
+
+    let unrealized_pnl = open_positions
+        .iter()
+        .map(|position| position.unrealized_pnl)
+        .sum::<f64>();
+    let final_equity = cash
+        + open_positions
+            .iter()
+            .map(|position| position.size * position.mark_price)
+            .sum::<f64>();
+
+    PortfolioSimulationReport {
+        tracked_wallets: inputs.len(),
+        followed_trades,
+        ignored_trades,
+        closed_trades: recent_executions
+            .iter()
+            .filter(|execution| execution.side == TradeSide::Sell)
+            .count(),
+        realized_pnl,
+        unrealized_pnl,
+        total_pnl: realized_pnl + unrealized_pnl,
+        final_cash: cash,
+        final_equity,
+        starting_cash: config.starting_cash,
+        open_positions,
+        recent_executions,
+    }
+}
+
 fn bounded_price(price: f64) -> f64 {
     price.clamp(0.001, 0.999)
 }
@@ -224,7 +457,7 @@ mod tests {
     use crate::config::SimulationConfig;
     use crate::domain::{TradeSide, WalletActivity, WalletActivityType};
 
-    use super::simulate_copy_trading;
+    use super::{SharedSimulationInput, simulate_copy_trading, simulate_shared_copy_trading};
 
     #[test]
     fn profitable_round_trip_produces_positive_pnl() {
@@ -291,5 +524,67 @@ mod tests {
             report.realized_pnl
         );
         assert_eq!(report.closed_trades, 1);
+    }
+
+    #[test]
+    fn shared_simulation_uses_one_cash_pool() {
+        let make_activity = |wallet: &str, asset: &str, timestamp: i64| WalletActivity {
+            proxy_wallet: wallet.to_owned(),
+            timestamp,
+            condition_id: format!("condition-{asset}"),
+            activity_type: WalletActivityType::Trade,
+            size: 10.0,
+            usdc_size: 80.0,
+            transaction_hash: None,
+            price: 0.4,
+            asset: asset.to_owned(),
+            side: Some(TradeSide::Buy),
+            outcome_index: None,
+            title: Some(format!("Trade {asset}")),
+            slug: None,
+            event_slug: None,
+            outcome: None,
+            name: None,
+            pseudonym: None,
+        };
+
+        let config = SimulationConfig {
+            wallet_scale: 1.0,
+            minimum_trade_usdc: 25.0,
+            max_trade_usdc: 100.0,
+            slippage_bps: 0.0,
+            starting_cash: 100.0,
+            ..SimulationConfig::default()
+        };
+
+        let report = simulate_shared_copy_trading(
+            &[
+                SharedSimulationInput {
+                    source_wallet: "0x1111111111111111111111111111111111111111".to_owned(),
+                    source_label: Some("One".to_owned()),
+                    activities: vec![make_activity(
+                        "0x1111111111111111111111111111111111111111",
+                        "asset-1",
+                        1_700_000_000,
+                    )],
+                    current_marks: HashMap::from([("asset-1".to_owned(), 0.4)]),
+                },
+                SharedSimulationInput {
+                    source_wallet: "0x2222222222222222222222222222222222222222".to_owned(),
+                    source_label: Some("Two".to_owned()),
+                    activities: vec![make_activity(
+                        "0x2222222222222222222222222222222222222222",
+                        "asset-2",
+                        1_700_000_001,
+                    )],
+                    current_marks: HashMap::from([("asset-2".to_owned(), 0.4)]),
+                },
+            ],
+            &config,
+        );
+
+        assert_eq!(report.followed_trades, 1);
+        assert_eq!(report.ignored_trades, 1);
+        assert_eq!(report.final_cash, 20.0);
     }
 }

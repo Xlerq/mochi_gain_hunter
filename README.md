@@ -15,7 +15,41 @@ Rust bot for researching and automating Polymarket wallet-following strategies.
 
 The repository is public and now contains the project source directly.
 
-## MVP Commands
+## App
+
+Launch the full-screen terminal app:
+
+```bash
+cargo run
+```
+
+The default app now includes:
+
+- `Leaderboard` tab with public Polymarket discovery
+- `Watchlist` tab with saved wallets and recent trades
+- `Wallet` tab for detailed inspection
+- `Paper` tab with a shared `$100` paper account across enabled wallets
+
+Useful controls:
+
+- `Tab` / `Shift+Tab` or `h` / `l`: switch tabs
+- `j` / `k` or arrows: move selection
+- `Enter`: open wallet actions
+- `i`: inspect selected wallet
+- `a`: add selected leaderboard wallet to watchlist
+- `p`: toggle paper-follow for the selected wallet
+- `d`: remove the selected watchlist wallet
+- `c` / `t` / `o`: cycle leaderboard category, time period, and ordering
+- `r`: refresh current data
+- `q`: quit
+
+Wallet actions from the app let you:
+
+- inspect a leaderboard or watchlist wallet
+- add/remove it from the watchlist
+- start or stop paper-following without editing config by hand
+
+## Debug Commands
 
 Initialize a local config file:
 
@@ -41,7 +75,7 @@ Run a paper copy-trade simulation for one wallet:
 cargo run -- simulate-follow 0x0123456789abcdef0123456789abcdef01234567
 ```
 
-Start the live wallet monitor dashboard:
+Start the older live wallet monitor dashboard:
 
 ```bash
 cargo run -- monitor
@@ -71,22 +105,6 @@ positions, closed positions, and midpoint prices. It does not place live orders 
 Live monitoring for other wallets currently uses public Data API polling and a Ratatui
 dashboard.
 
-## Monitor UX
-
-The Ratatui monitor is now a multi-pane dashboard:
-
-- left pane: watched wallets with score, recommendation, and simulated PnL
-- top-right: selected wallet summary plus a paper-book summary
-- middle-right: recent trades for the selected wallet
-- bottom-right: global recent trade feed across the watchlist
-
-Controls:
-
-- `q`: quit
-- `r`: force refresh
-- `j` / `k` or arrow keys: move selection
-- `g` / `G`: jump to first / last wallet
-
 ## Tracking Data
 
 The monitor now persists tracking data under `data/`:
@@ -95,10 +113,8 @@ The monitor now persists tracking data under `data/`:
 - `data/latest/`: latest report per wallet
 - `data/activities/`: appended trade activity logs used by backtesting
 
-Current caveat:
-
-- the paper-book summary currently aggregates a separate paper bankroll per watched wallet
-- it is useful for wallet comparison, but it is not yet a single shared-account simulator
+The main app now includes a shared paper simulation that uses one bankroll across all
+watchlist wallets with `paper_follow_enabled = true`.
 
 ## Near-Term Plan
 

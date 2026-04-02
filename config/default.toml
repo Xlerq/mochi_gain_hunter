@@ -32,7 +32,7 @@ weight_concentration_penalty = 0.75
 [simulation]
 follow_delay_secs = 8
 slippage_bps = 35.0
-wallet_scale = 0.10
+wallet_scale = 0.1
 max_trade_usdc = 50.0
 minimum_trade_usdc = 5.0
 starting_cash = 100.0
@@ -41,29 +41,41 @@ starting_cash = 100.0
 poll_interval_secs = 12
 recent_events_limit = 25
 focus_keywords = [
-  "bitcoin",
-  "btc",
-  "ethereum",
-  "eth",
-  "solana",
-  "crypto",
-  "president",
-  "trump",
-  "election",
-  "senate",
-  "house",
-  "white house",
-  "fed",
-  "sec",
+    "bitcoin",
+    "btc",
+    "ethereum",
+    "eth",
+    "solana",
+    "crypto",
+    "president",
+    "trump",
+    "election",
+    "senate",
+    "house",
+    "white house",
+    "fed",
+    "sec",
 ]
 
 [[monitor.wallets]]
-label = "Attentive-Silica"
 wallet = "0xde17f7144fbd0eddb2679132c10ff5e74b120988"
+label = "Attentive-Silica"
+paper_follow_enabled = true
 
 [[monitor.wallets]]
-label = "GamblingIsAllYouNeed"
 wallet = "@gamblingisallyouneed"
+label = "GamblingIsAllYouNeed"
+paper_follow_enabled = true
+
+[[monitor.wallets]]
+wallet = "0x2a2c53bd278c04da9962fcf96490e17f3dfb9bc1"
+label = "0x2a2C53bD278c04DA9962Fcf96490E17F3DfB9Bc1-1772479215461"
+paper_follow_enabled = true
+
+[[monitor.wallets]]
+wallet = "0xee613b3fc183ee44f9da9c05f53e2da107e3debf"
+label = "sovereign2013"
+paper_follow_enabled = true
 
 [storage]
 data_dir = "data"
@@ -71,7 +83,19 @@ persist_snapshots = true
 persist_activity = true
 
 [backtest]
-delay_grid_secs = [2, 8, 20]
-slippage_grid_bps = [10.0, 35.0, 75.0]
-wallet_scale_grid = [0.05, 0.10, 0.20]
+delay_grid_secs = [
+    2,
+    8,
+    20,
+]
+slippage_grid_bps = [
+    10.0,
+    35.0,
+    75.0,
+]
+wallet_scale_grid = [
+    0.05,
+    0.1,
+    0.2,
+]
 max_results = 8

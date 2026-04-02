@@ -1,7 +1,7 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LeaderboardCategory {
     #[default]
@@ -34,7 +34,7 @@ impl LeaderboardCategory {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum LeaderboardTimePeriod {
     #[default]
@@ -55,7 +55,7 @@ impl LeaderboardTimePeriod {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum, Default, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum LeaderboardOrderBy {
     #[default]
@@ -325,6 +325,46 @@ pub struct SimulationReport {
     pub tracked_to_timestamp: Option<i64>,
     pub open_positions: Vec<OpenSimulationPosition>,
     pub closed_positions: Vec<ClosedSimulationTrade>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioSimulationExecution {
+    pub source_wallet: String,
+    pub source_label: Option<String>,
+    pub asset: String,
+    pub title: Option<String>,
+    pub timestamp: i64,
+    pub side: TradeSide,
+    pub price: f64,
+    pub usdc_size: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioSimulationPosition {
+    pub source_wallet: String,
+    pub source_label: Option<String>,
+    pub asset: String,
+    pub title: Option<String>,
+    pub size: f64,
+    pub avg_entry_price: f64,
+    pub mark_price: f64,
+    pub unrealized_pnl: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioSimulationReport {
+    pub tracked_wallets: usize,
+    pub followed_trades: usize,
+    pub ignored_trades: usize,
+    pub closed_trades: usize,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub total_pnl: f64,
+    pub final_cash: f64,
+    pub final_equity: f64,
+    pub starting_cash: f64,
+    pub open_positions: Vec<PortfolioSimulationPosition>,
+    pub recent_executions: Vec<PortfolioSimulationExecution>,
 }
 
 #[derive(Debug, Clone, Serialize)]

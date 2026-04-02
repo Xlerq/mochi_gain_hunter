@@ -1,3 +1,4 @@
+mod app;
 mod backtest;
 mod config;
 mod domain;
@@ -15,6 +16,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use crate::app::run_app;
 use crate::backtest::run_backtest;
 use crate::config::AppConfig;
 use crate::domain::{LeaderboardCategory, LeaderboardOrderBy, LeaderboardTimePeriod, WalletReport};
@@ -32,7 +34,7 @@ struct Cli {
     #[arg(long, global = true, default_value = "config/default.toml")]
     config: PathBuf,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -84,25 +86,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::InitConfig { force } => init_config(&cli.config, force),
-        Commands::Discover {
+        Some(Commands::InitConfig { force }) => init_config(&cli.config, force),
+        Some(Commands::Discover {
             category,
             time_period,
             order_by,
             limit,
-        } => discover_wallets(&cli.config, category, time_period, order_by, limit).await,
-        Commands::InspectWallet { wallet } => inspect_wallet(&cli.config, &wallet).await,
-        Commands::SimulateFollow { wallet } => simulate_wallet(&cli.config, &wallet).await,
-        Commands::Monitor {
+        }) => discover_wallets(&cli.config, category, time_period, order_by, limit).await,
+        Some(Commands::InspectWallet { wallet }) => inspect_wallet(&cli.config, &wallet).await,
+        Some(Commands::SimulateFollow { wallet }) => simulate_wallet(&cli.config, &wallet).await,
+        Some(Commands::Monitor {
             wallet,
             plain,
             cycles,
-        } => run_monitor(&cli.config, wallet.as_deref(), plain, cycles).await,
-        Commands::BacktestWallet {
+        }) => run_monitor(&cli.config, wallet.as_deref(), plain, cycles).await,
+        Some(Commands::BacktestWallet {
             wallet,
             top,
             stored_only,
-        } => run_backtest(&cli.config, &wallet, top, stored_only).await,
+        }) => run_backtest(&cli.config, &wallet, top, stored_only).await,
+        None => run_app(&cli.config).await,
     }
 }
 

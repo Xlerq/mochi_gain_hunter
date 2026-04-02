@@ -55,6 +55,10 @@ impl AppConfig {
     }
 
     pub fn write_template(&self, path: &Path) -> Result<()> {
+        self.write_to_path(path)
+    }
+
+    pub fn write_to_path(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -256,6 +260,8 @@ pub struct WatchedWalletConfig {
     pub wallet: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default = "default_paper_follow_enabled")]
+    pub paper_follow_enabled: bool,
 }
 
 fn default_data_api_base_url() -> String {
@@ -406,10 +412,12 @@ fn default_watchlist() -> Vec<WatchedWalletConfig> {
         WatchedWalletConfig {
             wallet: "0xde17f7144fbd0eddb2679132c10ff5e74b120988".to_owned(),
             label: Some("Attentive-Silica".to_owned()),
+            paper_follow_enabled: true,
         },
         WatchedWalletConfig {
             wallet: "@gamblingisallyouneed".to_owned(),
             label: Some("GamblingIsAllYouNeed".to_owned()),
+            paper_follow_enabled: true,
         },
     ]
 }
@@ -440,4 +448,8 @@ fn default_wallet_scale_grid() -> Vec<f64> {
 
 fn default_backtest_max_results() -> usize {
     8
+}
+
+fn default_paper_follow_enabled() -> bool {
+    true
 }
