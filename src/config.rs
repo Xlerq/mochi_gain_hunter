@@ -29,6 +29,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub alerts: AlertConfig,
     #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub backtest: BacktestConfig,
@@ -47,6 +49,7 @@ impl Default for AppConfig {
             monitor: MonitorConfig::default(),
             service: ServiceConfig::default(),
             alerts: AlertConfig::default(),
+            execution: ExecutionConfig::default(),
             storage: StorageConfig::default(),
             backtest: BacktestConfig::default(),
         }
@@ -319,6 +322,42 @@ impl Default for AlertConfig {
             alert_on_partial: default_alert_on_partial(),
             alert_on_canceled: default_alert_on_canceled(),
             alert_on_skipped_reasons: default_alert_on_skipped_reasons(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExecutionMode {
+    Disabled,
+    Paper,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Paper
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub mode: ExecutionMode,
+    #[serde(default = "default_execution_print_to_stdout")]
+    pub print_to_stdout: bool,
+    #[serde(default = "default_execution_persist_to_disk")]
+    pub persist_to_disk: bool,
+    #[serde(default = "default_execution_submit_partial")]
+    pub submit_partial: bool,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            mode: ExecutionMode::default(),
+            print_to_stdout: default_execution_print_to_stdout(),
+            persist_to_disk: default_execution_persist_to_disk(),
+            submit_partial: default_execution_submit_partial(),
         }
     }
 }
@@ -600,6 +639,18 @@ fn default_alert_on_skipped_reasons() -> Vec<String> {
         "leader_unwound_before_fill".to_owned(),
         "follower_size_too_small_after_fees".to_owned(),
     ]
+}
+
+fn default_execution_print_to_stdout() -> bool {
+    true
+}
+
+fn default_execution_persist_to_disk() -> bool {
+    true
+}
+
+fn default_execution_submit_partial() -> bool {
+    true
 }
 
 fn default_focus_keywords() -> Vec<String> {

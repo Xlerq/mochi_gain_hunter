@@ -2,6 +2,7 @@ mod app;
 mod backtest;
 mod config;
 mod domain;
+mod executor;
 mod monitor;
 mod paper_runtime;
 mod polymarket;

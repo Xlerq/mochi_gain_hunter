@@ -119,6 +119,12 @@ alert_on_skipped_reasons = [
     "follower_size_too_small_after_fees",
 ]
 
+[execution]
+mode = "PAPER"
+print_to_stdout = true
+persist_to_disk = true
+submit_partial = true
+
 [storage]
 data_dir = "data"
 persist_snapshots = true

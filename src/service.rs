@@ -13,6 +13,7 @@ use crate::config::{AlertConfig, AppConfig};
 use crate::domain::{
     PortfolioSimulationExecution, PortfolioSimulationReport, SimulationExecutionStatus,
 };
+use crate::executor::{ExecutionBatchContext, build_execution_intents, build_executor};
 use crate::paper_runtime::{
     PaperRuntimeProgress, PaperRuntimeWalletInput, build_shared_paper_runtime,
 };
@@ -55,6 +56,7 @@ struct ServiceStatusRecord {
     replayed_history: bool,
     new_execution_count: usize,
     emitted_alert_count: usize,
+    executor_receipt_count: usize,
     open_positions: usize,
     final_cash: f64,
     final_equity: f64,
@@ -91,6 +93,7 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
     let max_cycles = cycles.or_else(|| once.then_some(1));
     let mut cycle = 0usize;
     let mut previous_rows = HashMap::new();
+    let mut executor = build_executor(&config);
 
     loop {
         cycle += 1;
@@ -110,6 +113,22 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
                         &outcome.paper.new_executions,
                     )
                 };
+                let executor_receipts = if suppress_replay_alerts {
+                    Vec::new()
+                } else {
+                    let intents = build_execution_intents(
+                        &outcome.paper.new_executions,
+                        config.execution.submit_partial,
+                    );
+                    executor.submit(
+                        &ExecutionBatchContext {
+                            cycle,
+                            account_cash: outcome.paper.summary.final_cash,
+                            account_equity: outcome.paper.summary.final_equity,
+                        },
+                        &intents,
+                    )?
+                };
 
                 emit_alerts(&config.alerts, &alerts)?;
                 persist_service_alerts(&config, &alerts)?;
@@ -128,13 +147,14 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
                     replayed_history: outcome.paper.replayed_history,
                     new_execution_count: outcome.paper.new_executions.len(),
                     emitted_alert_count: alerts.len(),
+                    executor_receipt_count: executor_receipts.len(),
                     open_positions: outcome.paper.summary.open_positions.len(),
                     final_cash: outcome.paper.summary.final_cash,
                     final_equity: outcome.paper.summary.final_equity,
                     total_pnl: outcome.paper.summary.total_pnl,
                     warnings: outcome.warnings.clone(),
                     message: format!(
-                        "service ok | journal {} | processed {} | alerts {} | stale {} | dropped {}",
+                        "service ok | journal {} | processed {} | alerts {} | executor {} | stale {} | dropped {}",
                         if outcome.paper.resumed_journal {
                             "resumed"
                         } else {
@@ -142,6 +162,7 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
                         },
                         outcome.paper.processed_activity_count,
                         alerts.len(),
+                        executor_receipts.len(),
                         outcome.stale_wallets,
                         outcome.dropped_wallets
                     ),
@@ -150,11 +171,12 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
 
                 if config.service.print_heartbeat {
                     println!(
-                        "[service] cycle={} wallets={} processed={} alerts={} equity={:.2} cash={:.2} stale={} dropped={} journal={} pnl={:.2}",
+                        "[service] cycle={} wallets={} processed={} alerts={} executor={} equity={:.2} cash={:.2} stale={} dropped={} journal={} pnl={:.2}",
                         cycle,
                         outcome.rows.len(),
                         outcome.paper.processed_activity_count,
                         alerts.len(),
+                        executor_receipts.len(),
                         outcome.paper.summary.final_equity,
                         outcome.paper.summary.final_cash,
                         outcome.stale_wallets,
@@ -193,6 +215,7 @@ pub async fn run_service(config_path: &Path, once: bool, cycles: Option<usize>) 
                     replayed_history: false,
                     new_execution_count: 0,
                     emitted_alert_count: 0,
+                    executor_receipt_count: 0,
                     open_positions: 0,
                     final_cash: 0.0,
                     final_equity: 0.0,

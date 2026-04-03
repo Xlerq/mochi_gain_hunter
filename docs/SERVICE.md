@@ -20,6 +20,7 @@ What it does each cycle:
 - persists wallet activity and snapshots
 - advances the forward-only shared paper journal
 - emits execution-style alerts for new paper decisions
+- routes actionable decisions through the executor boundary
 - writes service heartbeat and alert history under `data/service/`
 
 ## Service Files
@@ -28,6 +29,20 @@ What it does each cycle:
 - `data/service/history/status.jsonl`: heartbeat history
 - `data/service/alerts/latest.json`: latest emitted alerts
 - `data/service/alerts/history/alerts.jsonl`: alert history
+- `data/execution/latest.json`: latest executor receipts
+- `data/execution/history/receipts.jsonl`: executor receipt history
+
+## Executor Boundary
+
+The current executor mode is `PAPER`. It does not place live orders.
+
+It receives only actionable intents derived from paper decisions:
+
+- `FILLED`
+- `PARTIAL` when `execution.submit_partial = true`
+
+That executor then records receipts which can later be replaced by a real Polymarket
+execution adapter without changing the service loop itself.
 
 ## Alerts
 

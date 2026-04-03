@@ -68,6 +68,19 @@ This is still an approximation. Without historical order book depth, exact queue
 and real-time market snapshots, it cannot perfectly reproduce live fills. It is materially
 closer than the previous model, but it is not a guarantee of live execution quality.
 
+## Executor Boundary
+
+The service now has a dedicated executor boundary between strategy decisions and eventual
+order placement.
+
+- strategy and paper-following still decide what should be copied
+- alerts describe what happened in the paper account
+- the executor receives only actionable execution intents from `FILLED` and configured `PARTIAL` decisions
+- the current executor is `PAPER`, which records intents and receipts without sending live orders
+
+This matters because future live trading can replace the executor implementation without
+rewriting the discovery, journal, or alerting flow.
+
 ## Debug Commands
 
 Initialize a local config file:
@@ -151,6 +164,8 @@ The monitor now persists tracking data under `data/`:
 - `data/service/history/status.jsonl`: service heartbeat history
 - `data/service/alerts/latest.json`: latest emitted service alerts
 - `data/service/alerts/history/alerts.jsonl`: append-only service alert history
+- `data/execution/latest.json`: latest executor receipts
+- `data/execution/history/receipts.jsonl`: executor receipt history
 
 The main app now includes a shared paper simulation that uses one bankroll across all
 watchlist wallets with `paper_follow_enabled = true`.
@@ -158,7 +173,8 @@ watchlist wallets with `paper_follow_enabled = true`.
 The default config also includes an `[http]` section for request timeout and retry behavior,
 plus `simulation.taker_fee_bps` for extra execution realism. It also includes `[service]`
 and `[alerts]` sections for headless polling, replay suppression, stdout alerts, and optional
-desktop notifications through `notify-send`.
+desktop notifications through `notify-send`. The `[execution]` section controls the executor
+mode and whether paper executor receipts are printed and persisted.
 
 ## 24/7 Use
 
@@ -174,6 +190,7 @@ For 24/7 running, use the new `service` command instead of the TUI. It:
 - reuses stale wallet rows when one wallet times out
 - advances the forward-only paper journal
 - emits execution-style alerts for `FILLED`, `PARTIAL`, `CANCELED`, and configured risk skips
+- submits actionable paper decisions through the executor boundary
 - writes heartbeat and alert history to `data/service/`
 
 If you want desktop notifications, set:
