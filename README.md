@@ -76,7 +76,9 @@ order placement.
 - strategy and paper-following still decide what should be copied
 - alerts describe what happened in the paper account
 - the executor receives only actionable execution intents from `FILLED` and configured `PARTIAL` decisions
-- the current executor is `PAPER`, which records intents and receipts without sending live orders
+- the current executors are `PAPER` and `LIVE_DRY_RUN`
+- `PAPER` records intents and receipts without sending live orders
+- `LIVE_DRY_RUN` validates Polymarket credential env vars and builds live order candidates without submitting them
 
 This matters because future live trading can replace the executor implementation without
 rewriting the discovery, journal, or alerting flow.
@@ -174,7 +176,7 @@ The default config also includes an `[http]` section for request timeout and ret
 plus `simulation.taker_fee_bps` for extra execution realism. It also includes `[service]`
 and `[alerts]` sections for headless polling, replay suppression, stdout alerts, and optional
 desktop notifications through `notify-send`. The `[execution]` section controls the executor
-mode and whether paper executor receipts are printed and persisted.
+mode and whether executor receipts are printed and persisted.
 
 ## 24/7 Use
 

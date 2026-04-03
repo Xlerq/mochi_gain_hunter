@@ -331,6 +331,7 @@ impl Default for AlertConfig {
 pub enum ExecutionMode {
     Disabled,
     Paper,
+    LiveDryRun,
 }
 
 impl Default for ExecutionMode {
@@ -349,6 +350,18 @@ pub struct ExecutionConfig {
     pub persist_to_disk: bool,
     #[serde(default = "default_execution_submit_partial")]
     pub submit_partial: bool,
+    #[serde(default = "default_execution_clob_host")]
+    pub clob_host: String,
+    #[serde(default = "default_execution_chain_id")]
+    pub chain_id: u64,
+    #[serde(default = "default_execution_env_private_key")]
+    pub env_private_key: String,
+    #[serde(default = "default_execution_env_api_key")]
+    pub env_api_key: String,
+    #[serde(default = "default_execution_env_secret")]
+    pub env_secret: String,
+    #[serde(default = "default_execution_env_passphrase")]
+    pub env_passphrase: String,
 }
 
 impl Default for ExecutionConfig {
@@ -358,6 +371,12 @@ impl Default for ExecutionConfig {
             print_to_stdout: default_execution_print_to_stdout(),
             persist_to_disk: default_execution_persist_to_disk(),
             submit_partial: default_execution_submit_partial(),
+            clob_host: default_execution_clob_host(),
+            chain_id: default_execution_chain_id(),
+            env_private_key: default_execution_env_private_key(),
+            env_api_key: default_execution_env_api_key(),
+            env_secret: default_execution_env_secret(),
+            env_passphrase: default_execution_env_passphrase(),
         }
     }
 }
@@ -651,6 +670,30 @@ fn default_execution_persist_to_disk() -> bool {
 
 fn default_execution_submit_partial() -> bool {
     true
+}
+
+fn default_execution_clob_host() -> String {
+    "https://clob.polymarket.com".to_owned()
+}
+
+fn default_execution_chain_id() -> u64 {
+    137
+}
+
+fn default_execution_env_private_key() -> String {
+    "POLYMARKET_PRIVATE_KEY".to_owned()
+}
+
+fn default_execution_env_api_key() -> String {
+    "POLYMARKET_API_KEY".to_owned()
+}
+
+fn default_execution_env_secret() -> String {
+    "POLYMARKET_SECRET".to_owned()
+}
+
+fn default_execution_env_passphrase() -> String {
+    "POLYMARKET_PASSPHRASE".to_owned()
 }
 
 fn default_focus_keywords() -> Vec<String> {

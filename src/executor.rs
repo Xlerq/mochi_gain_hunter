@@ -2,11 +2,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fmt};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
-use crate::config::{AppConfig, ExecutionMode};
+use crate::config::{AppConfig, ExecutionConfig, ExecutionMode};
 use crate::domain::{PortfolioSimulationExecution, SimulationExecutionStatus, TradeSide};
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,17 @@ pub struct ExecutionIntent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LiveOrderCandidate {
+    pub clob_host: String,
+    pub chain_id: u64,
+    pub token_id: String,
+    pub side: String,
+    pub shares: f64,
+    pub limit_price: f64,
+    pub notional_usdc: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExecutionReceipt {
     pub captured_at: i64,
     pub cycle: usize,
@@ -41,6 +53,7 @@ pub struct ExecutionReceipt {
     pub intent: ExecutionIntent,
     pub account_cash: f64,
     pub account_equity: f64,
+    pub live_candidate: Option<LiveOrderCandidate>,
 }
 
 pub trait ExecutionGateway {
@@ -59,6 +72,18 @@ pub fn build_executor(config: &AppConfig) -> Box<dyn ExecutionGateway> {
             config.execution.print_to_stdout,
             config.execution.persist_to_disk,
         )),
+        ExecutionMode::LiveDryRun => match PolymarketLiveDryRunExecutor::new(
+            Path::new(&config.storage.data_dir),
+            &config.execution,
+        ) {
+            Ok(executor) => Box::new(executor),
+            Err(error) => Box::new(BrokenLiveExecutor::new(
+                Path::new(&config.storage.data_dir),
+                config.execution.print_to_stdout,
+                config.execution.persist_to_disk,
+                format!("live dry-run executor is not ready: {error}"),
+            )),
+        },
     }
 }
 
@@ -130,6 +155,7 @@ impl ExecutionGateway for PaperExecutionRecorder {
                 intent: intent.clone(),
                 account_cash: context.account_cash,
                 account_equity: context.account_equity,
+                live_candidate: None,
             })
             .collect::<Vec<_>>();
 
@@ -147,6 +173,137 @@ impl ExecutionGateway for PaperExecutionRecorder {
                         .clone()
                         .unwrap_or_else(|| shorten_wallet(&receipt.intent.source_wallet))
                 );
+            }
+        }
+
+        if self.persist_to_disk && !receipts.is_empty() {
+            persist_receipts(&self.data_dir, &receipts)?;
+        }
+
+        Ok(receipts)
+    }
+}
+
+struct BrokenLiveExecutor {
+    data_dir: std::path::PathBuf,
+    print_to_stdout: bool,
+    persist_to_disk: bool,
+    message: String,
+}
+
+impl BrokenLiveExecutor {
+    fn new(data_dir: &Path, print_to_stdout: bool, persist_to_disk: bool, message: String) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            print_to_stdout,
+            persist_to_disk,
+            message,
+        }
+    }
+}
+
+impl ExecutionGateway for BrokenLiveExecutor {
+    fn submit(
+        &mut self,
+        context: &ExecutionBatchContext,
+        intents: &[ExecutionIntent],
+    ) -> Result<Vec<ExecutionReceipt>> {
+        let receipts = intents
+            .iter()
+            .map(|intent| ExecutionReceipt {
+                captured_at: now_ts(),
+                cycle: context.cycle,
+                mode: "LIVE_DRY_RUN".to_owned(),
+                outcome: "BLOCKED".to_owned(),
+                message: self.message.clone(),
+                intent: intent.clone(),
+                account_cash: context.account_cash,
+                account_equity: context.account_equity,
+                live_candidate: None,
+            })
+            .collect::<Vec<_>>();
+
+        if self.print_to_stdout {
+            eprintln!("[executor][live-dry-run] {}", self.message);
+        }
+
+        if self.persist_to_disk && !receipts.is_empty() {
+            persist_receipts(&self.data_dir, &receipts)?;
+        }
+
+        Ok(receipts)
+    }
+}
+
+struct PolymarketLiveDryRunExecutor {
+    data_dir: std::path::PathBuf,
+    print_to_stdout: bool,
+    persist_to_disk: bool,
+    credentials: LiveCredentials,
+    clob_host: String,
+    chain_id: u64,
+}
+
+impl PolymarketLiveDryRunExecutor {
+    fn new(data_dir: &Path, config: &ExecutionConfig) -> Result<Self> {
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            print_to_stdout: config.print_to_stdout,
+            persist_to_disk: config.persist_to_disk,
+            credentials: LiveCredentials::from_env(config)?,
+            clob_host: config.clob_host.clone(),
+            chain_id: config.chain_id,
+        })
+    }
+}
+
+impl ExecutionGateway for PolymarketLiveDryRunExecutor {
+    fn submit(
+        &mut self,
+        context: &ExecutionBatchContext,
+        intents: &[ExecutionIntent],
+    ) -> Result<Vec<ExecutionReceipt>> {
+        let receipts = intents
+            .iter()
+            .map(|intent| {
+                let candidate = live_candidate_from_intent(&self.clob_host, self.chain_id, intent);
+                ExecutionReceipt {
+                    captured_at: now_ts(),
+                    cycle: context.cycle,
+                    mode: "LIVE_DRY_RUN".to_owned(),
+                    outcome: "SIMULATED".to_owned(),
+                    message: format!(
+                        "live dry-run built {} {} {:.4} shares @ {:.4} using {} / {} / {} / {}",
+                        trade_side_label(intent.side),
+                        candidate.token_id,
+                        candidate.shares,
+                        candidate.limit_price,
+                        self.credentials.private_key.label,
+                        self.credentials.api_key.label,
+                        self.credentials.secret.label,
+                        self.credentials.passphrase.label
+                    ),
+                    intent: intent.clone(),
+                    account_cash: context.account_cash,
+                    account_equity: context.account_equity,
+                    live_candidate: Some(candidate),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if self.print_to_stdout {
+            for receipt in &receipts {
+                if let Some(candidate) = &receipt.live_candidate {
+                    println!(
+                        "[executor][live-dry-run] {} {} {:.4} shares @ {:.4} wallet={} host={}",
+                        trade_side_label(receipt.intent.side),
+                        candidate.token_id,
+                        candidate.shares,
+                        candidate.limit_price,
+                        shorten_wallet(&receipt.intent.source_wallet),
+                        candidate.clob_host
+                    );
+                }
             }
         }
 
@@ -179,6 +336,66 @@ fn intent_from_execution(execution: &PortfolioSimulationExecution) -> ExecutionI
         limit_price: execution.price,
         leader_timestamp: execution.leader_timestamp,
         decision_timestamp: execution.timestamp,
+    }
+}
+
+fn live_candidate_from_intent(
+    clob_host: &str,
+    chain_id: u64,
+    intent: &ExecutionIntent,
+) -> LiveOrderCandidate {
+    LiveOrderCandidate {
+        clob_host: clob_host.to_owned(),
+        chain_id,
+        token_id: intent.asset.clone(),
+        side: trade_side_label(intent.side).to_owned(),
+        shares: (intent.notional_usdc / intent.limit_price.max(0.000_001)).max(0.0),
+        limit_price: intent.limit_price,
+        notional_usdc: intent.notional_usdc,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SecretLabel {
+    label: &'static str,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+struct LiveCredentials {
+    private_key: SecretLabel,
+    api_key: SecretLabel,
+    secret: SecretLabel,
+    passphrase: SecretLabel,
+}
+
+impl LiveCredentials {
+    fn from_env(config: &ExecutionConfig) -> Result<Self> {
+        Ok(Self {
+            private_key: SecretLabel::load(&config.env_private_key, "private_key")?,
+            api_key: SecretLabel::load(&config.env_api_key, "api_key")?,
+            secret: SecretLabel::load(&config.env_secret, "secret")?,
+            passphrase: SecretLabel::load(&config.env_passphrase, "passphrase")?,
+        })
+    }
+}
+
+impl SecretLabel {
+    fn load(env_key: &str, label: &'static str) -> Result<Self> {
+        let value = env::var(env_key)
+            .map_err(|_| anyhow!("missing required env var {env_key} for live execution"))?;
+        if value.trim().is_empty() {
+            return Err(anyhow!("env var {env_key} is empty"));
+        }
+
+        Ok(Self { label, value })
+    }
+}
+
+impl fmt::Display for SecretLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = &self.value;
+        write!(f, "{}", self.label)
     }
 }
 

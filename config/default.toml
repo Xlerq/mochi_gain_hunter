@@ -124,6 +124,12 @@ mode = "PAPER"
 print_to_stdout = true
 persist_to_disk = true
 submit_partial = true
+clob_host = "https://clob.polymarket.com"
+chain_id = 137
+env_private_key = "POLYMARKET_PRIVATE_KEY"
+env_api_key = "POLYMARKET_API_KEY"
+env_secret = "POLYMARKET_SECRET"
+env_passphrase = "POLYMARKET_PASSPHRASE"
 
 [storage]
 data_dir = "data"
