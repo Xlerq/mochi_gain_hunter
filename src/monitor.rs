@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -52,8 +52,12 @@ struct WalletMonitorRow {
     tracked_trade_count: usize,
     paper_followed_trades: usize,
     paper_closed_trades: usize,
+    paper_open_positions: usize,
+    paper_realized_pnl: f64,
+    paper_unrealized_pnl: f64,
     paper_final_cash: f64,
     paper_final_equity: f64,
+    paper_starting_cash: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,10 +202,15 @@ async fn run_tui_monitor(
                     >= Duration::from_secs(config.monitor.poll_interval_secs)
             {
                 state.status_message = "refreshing live wallet data".to_owned();
-                refresh_state(client, config, watchlist, state).await?;
+                match refresh_state(client, config, watchlist, state).await {
+                    Ok(()) => {}
+                    Err(error) => {
+                        state.status_message =
+                            format_status_error("monitor refresh failed", &error);
+                    }
+                }
                 completed_cycles += 1;
                 refresh_deadline = Instant::now();
-                state.status_message = "live monitor ready".to_owned();
             }
 
             terminal.draw(|frame| draw_dashboard(frame, state))?;
@@ -251,6 +260,12 @@ async fn refresh_state(
     watchlist: &[ResolvedWatchTarget],
     state: &mut MonitorState,
 ) -> Result<()> {
+    let previous_rows = state
+        .snapshot
+        .wallets
+        .iter()
+        .map(|row| (row.wallet.clone(), row.clone()))
+        .collect::<HashMap<_, _>>();
     let mut rows = Vec::with_capacity(watchlist.len());
     let mut paper_book = PaperBookSummary {
         wallet_count: watchlist.len(),
@@ -264,9 +279,23 @@ async fn refresh_state(
         total_final_equity: 0.0,
         total_starting_cash: 0.0,
     };
+    let mut stale_wallets = 0usize;
+    let mut dropped_wallets = 0usize;
 
     for watched in watchlist {
-        let analysis = build_wallet_analysis(client, config, &watched.wallet, None).await?;
+        let analysis = match build_wallet_analysis(client, config, &watched.wallet, None).await {
+            Ok(analysis) => analysis,
+            Err(_) => {
+                if let Some(previous) = previous_rows.get(&watched.wallet) {
+                    rows.push(previous.clone());
+                    accumulate_paper_book_from_row(&mut paper_book, previous);
+                    stale_wallets += 1;
+                    continue;
+                }
+                dropped_wallets += 1;
+                continue;
+            }
+        };
         let report = analysis.report;
         let label = watched
             .label
@@ -316,8 +345,28 @@ async fn refresh_state(
     if state.selected_wallet >= state.snapshot.wallets.len() {
         state.selected_wallet = state.snapshot.wallets.len().saturating_sub(1);
     }
+    state.status_message = if stale_wallets == 0 && dropped_wallets == 0 {
+        "live monitor ready".to_owned()
+    } else {
+        format!(
+            "live monitor ready | stale {} | dropped {}",
+            stale_wallets, dropped_wallets
+        )
+    };
 
     Ok(())
+}
+
+fn accumulate_paper_book_from_row(paper_book: &mut PaperBookSummary, row: &WalletMonitorRow) {
+    paper_book.total_followed_trades += row.paper_followed_trades;
+    paper_book.total_closed_trades += row.paper_closed_trades;
+    paper_book.total_open_positions += row.paper_open_positions;
+    paper_book.total_realized_pnl += row.paper_realized_pnl;
+    paper_book.total_unrealized_pnl += row.paper_unrealized_pnl;
+    paper_book.total_pnl += row.sim_total_pnl;
+    paper_book.total_final_cash += row.paper_final_cash;
+    paper_book.total_final_equity += row.paper_final_equity;
+    paper_book.total_starting_cash += row.paper_starting_cash;
 }
 
 async fn resolve_watchlist(
@@ -389,8 +438,12 @@ fn wallet_row_from_report(
         tracked_trade_count,
         paper_followed_trades: report.simulation.followed_trades,
         paper_closed_trades: report.simulation.closed_trades,
+        paper_open_positions: report.simulation.open_positions.len(),
+        paper_realized_pnl: report.simulation.realized_pnl,
+        paper_unrealized_pnl: report.simulation.unrealized_pnl,
         paper_final_cash: report.simulation.final_cash,
         paper_final_equity: report.simulation.final_equity,
+        paper_starting_cash: report.simulation.starting_cash,
     }
 }
 
@@ -810,6 +863,15 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
         truncated.push_str("...");
     }
     truncated
+}
+
+fn format_status_error(prefix: &str, error: &anyhow::Error) -> String {
+    let message = error
+        .chain()
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("{}: {}", prefix, truncate_text(&message, 120))
 }
 
 fn score_color(score: f64) -> Color {

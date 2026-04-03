@@ -1,0 +1,16 @@
+[Unit]
+Description=Mochi Gain Hunter Polymarket paper-follow service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/mochi_gain_hunter
+ExecStart=%h/Projects/mochi_gain_hunter/target/release/mochi_gain_hunter --config %h/Projects/mochi_gain_hunter/config/default.toml service
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

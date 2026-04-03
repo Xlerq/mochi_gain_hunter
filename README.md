@@ -56,10 +56,12 @@ like a live follower:
 
 - uses one shared bankroll across all enabled wallets
 - applies delayed pending orders instead of immediate fills
+- uses conservative market-side pricing, so paper fills do not beat the current market mark
 - aggregates micro leader buys into executable follower-sized orders for small accounts
 - cancels or shrinks buys if the leader unwinds before our delayed fill
 - enforces a cash reserve, total exposure cap, per-wallet cap, per-position cap, and max open positions
 - applies base slippage plus additional size-based impact slippage
+- applies configurable taker-fee friction to copied trades
 - records skipped and partial-fill reasons so you can see why trades were not copied cleanly
 
 This is still an approximation. Without historical order book depth, exact queue position,
@@ -111,6 +113,18 @@ Emit one non-interactive JSON monitoring snapshot:
 cargo run -- monitor --plain --cycles 1
 ```
 
+Run the headless background service once:
+
+```bash
+cargo run -- service --once
+```
+
+Run the headless background service continuously:
+
+```bash
+cargo run -- service
+```
+
 Backtest a wallet across a small parameter grid:
 
 ```bash
@@ -133,22 +147,44 @@ The monitor now persists tracking data under `data/`:
 - `data/paper_account/history/shared_account.jsonl`: paper-account history for long-running use
 - `data/paper_account/forward_state.json`: resumable forward-only paper state
 - `data/paper_account/history/journal.jsonl`: append-only paper execution journal
+- `data/service/status.json`: latest headless service heartbeat
+- `data/service/history/status.jsonl`: service heartbeat history
+- `data/service/alerts/latest.json`: latest emitted service alerts
+- `data/service/alerts/history/alerts.jsonl`: append-only service alert history
 
 The main app now includes a shared paper simulation that uses one bankroll across all
 watchlist wallets with `paper_follow_enabled = true`.
+
+The default config also includes an `[http]` section for request timeout and retry behavior,
+plus `simulation.taker_fee_bps` for extra execution realism. It also includes `[service]`
+and `[alerts]` sections for headless polling, replay suppression, stdout alerts, and optional
+desktop notifications through `notify-send`.
 
 ## 24/7 Use
 
 The app is now better suited for long-running use because the shared paper account no longer
 needs a full replay on each refresh. It persists a resumable forward-only journal and advances
 from locally stored wallet activity, with a small overlap window to avoid missing edge-case
-events around restarts.
+events around restarts. API calls now use retry plus backoff, and both the TUI and the
+headless service keep running on refresh errors instead of exiting on a single timeout.
 
-Practical next moves:
+For 24/7 running, use the new `service` command instead of the TUI. It:
 
-1. run it under `tmux`, `screen`, or a user service so it survives terminal disconnects
-2. add alerting for new copied, skipped, and partial trades
-3. add a dedicated background/service mode so the same engine can run without the full TUI open
+- refreshes the watchlist on a fixed interval
+- reuses stale wallet rows when one wallet times out
+- advances the forward-only paper journal
+- emits execution-style alerts for `FILLED`, `PARTIAL`, `CANCELED`, and configured risk skips
+- writes heartbeat and alert history to `data/service/`
+
+If you want desktop notifications, set:
+
+```toml
+[alerts]
+desktop_notifications = true
+desktop_command = "notify-send"
+```
+
+For a persistent user service, see [docs/SERVICE.md](/home/xler/Projects/mochi_gain_hunter/docs/SERVICE.md) and the unit example [docs/mochi_gain_hunter.service](/home/xler/Projects/mochi_gain_hunter/docs/mochi_gain_hunter.service).
 
 ## Near-Term Plan
 

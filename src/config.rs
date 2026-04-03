@@ -15,6 +15,8 @@ pub struct AppConfig {
     #[serde(default = "default_gamma_api_base_url")]
     pub gamma_api_base_url: String,
     #[serde(default)]
+    pub http: HttpConfig,
+    #[serde(default)]
     pub discover: DiscoverConfig,
     #[serde(default)]
     pub scoring: ScoringConfig,
@@ -22,6 +24,10 @@ pub struct AppConfig {
     pub simulation: SimulationConfig,
     #[serde(default)]
     pub monitor: MonitorConfig,
+    #[serde(default)]
+    pub service: ServiceConfig,
+    #[serde(default)]
+    pub alerts: AlertConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
@@ -34,10 +40,13 @@ impl Default for AppConfig {
             data_api_base_url: default_data_api_base_url(),
             clob_api_base_url: default_clob_api_base_url(),
             gamma_api_base_url: default_gamma_api_base_url(),
+            http: HttpConfig::default(),
             discover: DiscoverConfig::default(),
             scoring: ScoringConfig::default(),
             simulation: SimulationConfig::default(),
             monitor: MonitorConfig::default(),
+            service: ServiceConfig::default(),
+            alerts: AlertConfig::default(),
             storage: StorageConfig::default(),
             backtest: BacktestConfig::default(),
         }
@@ -66,6 +75,29 @@ impl AppConfig {
         let raw = toml::to_string_pretty(self)?;
         fs::write(path, raw)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: usize,
+    #[serde(default = "default_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_secs: default_request_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            retry_attempts: default_retry_attempts(),
+            retry_backoff_ms: default_retry_backoff_ms(),
+        }
     }
 }
 
@@ -188,6 +220,8 @@ pub struct SimulationConfig {
     pub max_wallet_exposure_ratio: f64,
     #[serde(default = "default_max_open_positions")]
     pub max_open_positions: usize,
+    #[serde(default = "default_taker_fee_bps")]
+    pub taker_fee_bps: f64,
 }
 
 impl Default for SimulationConfig {
@@ -206,6 +240,7 @@ impl Default for SimulationConfig {
             max_position_exposure_ratio: default_max_position_exposure_ratio(),
             max_wallet_exposure_ratio: default_max_wallet_exposure_ratio(),
             max_open_positions: default_max_open_positions(),
+            taker_fee_bps: default_taker_fee_bps(),
         }
     }
 }
@@ -229,6 +264,61 @@ impl Default for MonitorConfig {
             recent_events_limit: default_recent_events_limit(),
             focus_keywords: default_focus_keywords(),
             wallets: default_watchlist(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    #[serde(default = "default_service_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    #[serde(default = "default_service_print_heartbeat")]
+    pub print_heartbeat: bool,
+    #[serde(default = "default_service_suppress_replay_alerts")]
+    pub suppress_replay_alerts: bool,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: default_service_poll_interval_secs(),
+            print_heartbeat: default_service_print_heartbeat(),
+            suppress_replay_alerts: default_service_suppress_replay_alerts(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertConfig {
+    #[serde(default = "default_alert_print_to_stdout")]
+    pub print_to_stdout: bool,
+    #[serde(default = "default_alert_persist_to_disk")]
+    pub persist_to_disk: bool,
+    #[serde(default = "default_alert_desktop_notifications")]
+    pub desktop_notifications: bool,
+    #[serde(default = "default_alert_desktop_command")]
+    pub desktop_command: String,
+    #[serde(default = "default_alert_on_filled")]
+    pub alert_on_filled: bool,
+    #[serde(default = "default_alert_on_partial")]
+    pub alert_on_partial: bool,
+    #[serde(default = "default_alert_on_canceled")]
+    pub alert_on_canceled: bool,
+    #[serde(default = "default_alert_on_skipped_reasons")]
+    pub alert_on_skipped_reasons: Vec<String>,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            print_to_stdout: default_alert_print_to_stdout(),
+            persist_to_disk: default_alert_persist_to_disk(),
+            desktop_notifications: default_alert_desktop_notifications(),
+            desktop_command: default_alert_desktop_command(),
+            alert_on_filled: default_alert_on_filled(),
+            alert_on_partial: default_alert_on_partial(),
+            alert_on_canceled: default_alert_on_canceled(),
+            alert_on_skipped_reasons: default_alert_on_skipped_reasons(),
         }
     }
 }
@@ -302,6 +392,22 @@ fn default_gamma_api_base_url() -> String {
 
 fn default_candidate_count() -> usize {
     10
+}
+
+fn default_request_timeout_secs() -> u64 {
+    30
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    10
+}
+
+fn default_retry_attempts() -> usize {
+    3
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    750
 }
 
 fn default_activity_limit() -> usize {
@@ -432,12 +538,68 @@ fn default_max_open_positions() -> usize {
     6
 }
 
+fn default_taker_fee_bps() -> f64 {
+    50.0
+}
+
 fn default_poll_interval_secs() -> u64 {
     12
 }
 
 fn default_recent_events_limit() -> usize {
     25
+}
+
+fn default_service_poll_interval_secs() -> u64 {
+    15
+}
+
+fn default_service_print_heartbeat() -> bool {
+    true
+}
+
+fn default_service_suppress_replay_alerts() -> bool {
+    true
+}
+
+fn default_alert_print_to_stdout() -> bool {
+    true
+}
+
+fn default_alert_persist_to_disk() -> bool {
+    true
+}
+
+fn default_alert_desktop_notifications() -> bool {
+    false
+}
+
+fn default_alert_desktop_command() -> String {
+    "notify-send".to_owned()
+}
+
+fn default_alert_on_filled() -> bool {
+    true
+}
+
+fn default_alert_on_partial() -> bool {
+    true
+}
+
+fn default_alert_on_canceled() -> bool {
+    true
+}
+
+fn default_alert_on_skipped_reasons() -> Vec<String> {
+    vec![
+        "cash_reserve_blocked".to_owned(),
+        "total_exposure_limit".to_owned(),
+        "wallet_exposure_limit".to_owned(),
+        "position_exposure_limit".to_owned(),
+        "max_open_positions_reached".to_owned(),
+        "leader_unwound_before_fill".to_owned(),
+        "follower_size_too_small_after_fees".to_owned(),
+    ]
 }
 
 fn default_focus_keywords() -> Vec<String> {

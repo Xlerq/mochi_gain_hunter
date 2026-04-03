@@ -2,11 +2,17 @@ data_api_base_url = "https://data-api.polymarket.com"
 clob_api_base_url = "https://clob.polymarket.com"
 gamma_api_base_url = "https://gamma-api.polymarket.com"
 
+[http]
+request_timeout_secs = 30
+connect_timeout_secs = 10
+retry_attempts = 3
+retry_backoff_ms = 750
+
 [discover]
-category = "OVERALL"
+category = "POLITICS"
 time_period = "MONTH"
 order_by = "PNL"
-candidate_count = 10
+candidate_count = 20
 activity_limit = 200
 positions_limit = 100
 closed_positions_limit = 50
@@ -33,7 +39,7 @@ weight_concentration_penalty = 0.75
 follow_delay_secs = 8
 slippage_bps = 35.0
 impact_slippage_bps = 20.0
-wallet_scale = 0.1
+wallet_scale = 0.01
 max_trade_usdc = 50.0
 minimum_trade_usdc = 2.0
 min_leader_trade_usdc = 0.0
@@ -42,7 +48,8 @@ cash_reserve_ratio = 0.1
 max_total_exposure_ratio = 0.9
 max_position_exposure_ratio = 0.35
 max_wallet_exposure_ratio = 0.5
-max_open_positions = 6
+max_open_positions = 20
+taker_fee_bps = 50.0
 
 [monitor]
 poll_interval_secs = 12
@@ -88,6 +95,29 @@ paper_follow_enabled = true
 wallet = "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
 label = "RN1"
 paper_follow_enabled = true
+
+[service]
+poll_interval_secs = 15
+print_heartbeat = true
+suppress_replay_alerts = true
+
+[alerts]
+print_to_stdout = true
+persist_to_disk = true
+desktop_notifications = false
+desktop_command = "notify-send"
+alert_on_filled = true
+alert_on_partial = true
+alert_on_canceled = true
+alert_on_skipped_reasons = [
+    "cash_reserve_blocked",
+    "total_exposure_limit",
+    "wallet_exposure_limit",
+    "position_exposure_limit",
+    "max_open_positions_reached",
+    "leader_unwound_before_fill",
+    "follower_size_too_small_after_fees",
+]
 
 [storage]
 data_dir = "data"

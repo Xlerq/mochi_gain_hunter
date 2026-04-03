@@ -1209,12 +1209,38 @@ fn execute_buy(
     }
 
     let price = bounded_price(apply_buy_slippage(
-        order.reference_price,
+        conservative_reference_price(
+            TradeSide::Buy,
+            order.reference_price,
+            current_marks.get(&order.asset).copied(),
+        ),
         effective_slippage_bps(config, fill_usdc),
     ));
     let fill_ratio = (fill_usdc / order.requested_usdc.max(EPSILON)).clamp(0.0, 1.0);
     let matched_leader_size = order.leader_size_remaining * fill_ratio;
-    let follower_size = fill_usdc / price;
+    let follower_size = apply_buy_fee_to_size(fill_usdc / price, config.taker_fee_bps);
+
+    if follower_size <= EPSILON {
+        record_execution(
+            state,
+            PortfolioSimulationExecution {
+                source_wallet: order.source_wallet,
+                source_label: order.source_label,
+                asset: order.asset,
+                title: order.title,
+                leader_timestamp: order.leader_timestamp,
+                timestamp: order.scheduled_timestamp,
+                side: TradeSide::Buy,
+                status: SimulationExecutionStatus::Skipped,
+                requested_usdc: order.initial_requested_usdc,
+                filled_usdc: 0.0,
+                price,
+                usdc_size: 0.0,
+                reason: Some("follower_size_too_small_after_fees".to_owned()),
+            },
+        );
+        return;
+    }
 
     let position = state
         .open_positions
@@ -1232,7 +1258,7 @@ fn execute_buy(
         });
 
     let total_size = position.follower_size + follower_size;
-    let total_cost = (position.avg_entry_price * position.follower_size) + (price * follower_size);
+    let total_cost = (position.avg_entry_price * position.follower_size) + fill_usdc;
     position.avg_entry_price = total_cost / total_size.max(f64::EPSILON);
     position.follower_size = total_size;
     position.leader_size += matched_leader_size;
@@ -1381,10 +1407,15 @@ fn execute_sell(
 
     let estimated_notional = sold_follower_size * position.avg_entry_price;
     let price = bounded_price(apply_sell_slippage(
-        order.reference_price,
+        conservative_reference_price(
+            TradeSide::Sell,
+            order.reference_price,
+            current_marks.get(&order.asset).copied(),
+        ),
         effective_slippage_bps(config, estimated_notional),
     ));
-    let proceeds = sold_follower_size * price;
+    let gross_proceeds = sold_follower_size * price;
+    let proceeds = apply_sell_fee_to_proceeds(gross_proceeds, config.taker_fee_bps);
     let cost_basis = sold_follower_size * position.avg_entry_price;
     let pnl = proceeds - cost_basis;
 
@@ -1632,12 +1663,33 @@ fn bounded_price(price: f64) -> f64 {
     price.clamp(0.001, 0.999)
 }
 
+fn conservative_reference_price(
+    side: TradeSide,
+    reference_price: f64,
+    market_price: Option<f64>,
+) -> f64 {
+    let market_price = market_price.unwrap_or(reference_price);
+    match side {
+        TradeSide::Buy => reference_price.max(market_price),
+        TradeSide::Sell => reference_price.min(market_price),
+        TradeSide::Unknown => reference_price,
+    }
+}
+
 fn apply_buy_slippage(price: f64, slippage_bps: f64) -> f64 {
     price * (1.0 + slippage_bps / 10_000.0)
 }
 
 fn apply_sell_slippage(price: f64, slippage_bps: f64) -> f64 {
     price * (1.0 - slippage_bps / 10_000.0)
+}
+
+fn apply_buy_fee_to_size(size: f64, taker_fee_bps: f64) -> f64 {
+    size * (1.0 - taker_fee_bps.max(0.0) / 10_000.0)
+}
+
+fn apply_sell_fee_to_proceeds(proceeds: f64, taker_fee_bps: f64) -> f64 {
+    proceeds * (1.0 - taker_fee_bps.max(0.0) / 10_000.0)
 }
 
 #[cfg(test)]
@@ -1702,6 +1754,7 @@ mod tests {
             max_trade_usdc: 50.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.0,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 1.0,
@@ -1775,6 +1828,7 @@ mod tests {
             max_trade_usdc: 50.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.0,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 1.0,
@@ -1826,6 +1880,7 @@ mod tests {
             max_trade_usdc: 100.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.10,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 1.0,
@@ -1896,6 +1951,7 @@ mod tests {
             max_trade_usdc: 100.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.0,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 0.20,
@@ -1977,6 +2033,7 @@ mod tests {
             max_trade_usdc: 50.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.0,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 1.0,
@@ -2051,6 +2108,7 @@ mod tests {
             max_trade_usdc: 50.0,
             slippage_bps: 0.0,
             impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
             cash_reserve_ratio: 0.0,
             max_total_exposure_ratio: 1.0,
             max_position_exposure_ratio: 1.0,
@@ -2113,5 +2171,112 @@ mod tests {
         assert_eq!(third_progress.processed_activity_count, 1);
         assert_eq!(third_progress.report.closed_trades, 1);
         assert_eq!(third_progress.report.followed_trades, 2);
+    }
+
+    #[test]
+    fn buy_fill_uses_worse_current_market_price() {
+        let wallet = "0x1111111111111111111111111111111111111111";
+        let asset = "asset-1";
+        let activities = vec![WalletActivity {
+            proxy_wallet: wallet.to_owned(),
+            timestamp: 1_700_000_000,
+            condition_id: "condition-1".to_owned(),
+            activity_type: WalletActivityType::Trade,
+            size: 10.0,
+            usdc_size: 40.0,
+            transaction_hash: None,
+            price: 0.4,
+            asset: asset.to_owned(),
+            side: Some(TradeSide::Buy),
+            outcome_index: None,
+            title: Some("Conservative fill".to_owned()),
+            slug: None,
+            event_slug: None,
+            outcome: None,
+            name: None,
+            pseudonym: None,
+        }];
+
+        let config = SimulationConfig {
+            follow_delay_secs: 0,
+            wallet_scale: 1.0,
+            minimum_trade_usdc: 2.0,
+            min_leader_trade_usdc: 0.0,
+            max_trade_usdc: 50.0,
+            slippage_bps: 0.0,
+            impact_slippage_bps: 0.0,
+            taker_fee_bps: 0.0,
+            cash_reserve_ratio: 0.0,
+            max_total_exposure_ratio: 1.0,
+            max_position_exposure_ratio: 1.0,
+            max_wallet_exposure_ratio: 1.0,
+            max_open_positions: 10,
+            starting_cash: 100.0,
+            ..SimulationConfig::default()
+        };
+
+        let report = simulate_copy_trading(
+            wallet,
+            &activities,
+            &HashMap::from([(asset.to_owned(), 0.6)]),
+            &config,
+        );
+
+        assert_eq!(report.open_positions.len(), 1);
+        assert!((report.open_positions[0].avg_entry_price - 0.6).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn buy_fee_reduces_received_position_size() {
+        let wallet = "0x1111111111111111111111111111111111111111";
+        let asset = "asset-1";
+        let activities = vec![WalletActivity {
+            proxy_wallet: wallet.to_owned(),
+            timestamp: 1_700_000_000,
+            condition_id: "condition-1".to_owned(),
+            activity_type: WalletActivityType::Trade,
+            size: 100.0,
+            usdc_size: 50.0,
+            transaction_hash: None,
+            price: 0.5,
+            asset: asset.to_owned(),
+            side: Some(TradeSide::Buy),
+            outcome_index: None,
+            title: Some("Fee test".to_owned()),
+            slug: None,
+            event_slug: None,
+            outcome: None,
+            name: None,
+            pseudonym: None,
+        }];
+
+        let config = SimulationConfig {
+            follow_delay_secs: 0,
+            wallet_scale: 1.0,
+            minimum_trade_usdc: 2.0,
+            min_leader_trade_usdc: 0.0,
+            max_trade_usdc: 50.0,
+            slippage_bps: 0.0,
+            impact_slippage_bps: 0.0,
+            taker_fee_bps: 100.0,
+            cash_reserve_ratio: 0.0,
+            max_total_exposure_ratio: 1.0,
+            max_position_exposure_ratio: 1.0,
+            max_wallet_exposure_ratio: 1.0,
+            max_open_positions: 10,
+            starting_cash: 100.0,
+            ..SimulationConfig::default()
+        };
+
+        let report = simulate_copy_trading(
+            wallet,
+            &activities,
+            &HashMap::from([(asset.to_owned(), 0.5)]),
+            &config,
+        );
+
+        assert_eq!(report.open_positions.len(), 1);
+        assert!((report.open_positions[0].size - 99.0).abs() < 0.000_001);
+        assert!(report.open_positions[0].avg_entry_price > 0.5);
     }
 }

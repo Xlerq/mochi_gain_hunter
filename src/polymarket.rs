@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio::time::sleep;
 
 use crate::config::AppConfig;
 use crate::domain::{
@@ -16,6 +17,8 @@ pub struct PolymarketClient {
     data_api_base_url: String,
     clob_api_base_url: String,
     _gamma_api_base_url: String,
+    retry_attempts: usize,
+    retry_backoff_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +32,10 @@ impl PolymarketClient {
     pub fn new(config: &AppConfig) -> Result<Self> {
         let http = Client::builder()
             .user_agent("mochi_gain_hunter/0.1.0")
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(config.http.request_timeout_secs))
+            .connect_timeout(Duration::from_secs(config.http.connect_timeout_secs))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
             .build()?;
 
         Ok(Self {
@@ -37,6 +43,8 @@ impl PolymarketClient {
             data_api_base_url: config.data_api_base_url.trim_end_matches('/').to_owned(),
             clob_api_base_url: config.clob_api_base_url.trim_end_matches('/').to_owned(),
             _gamma_api_base_url: config.gamma_api_base_url.trim_end_matches('/').to_owned(),
+            retry_attempts: config.http.retry_attempts,
+            retry_backoff_ms: config.http.retry_backoff_ms,
         })
     }
 
@@ -107,7 +115,12 @@ impl PolymarketClient {
     pub async fn midpoint_price(&self, token_id: &str) -> Result<Option<f64>> {
         let params = vec![("token_id", token_id.to_owned())];
         let url = format!("{}/midpoint", self.clob_api_base_url);
-        let response = self.http.get(url).query(&params).send().await?;
+        let response = self
+            .send_with_retry(
+                || self.http.get(url.clone()).query(&params),
+                &format!("fetch midpoint for token {token_id}"),
+            )
+            .await?;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
@@ -158,9 +171,10 @@ impl PolymarketClient {
         let normalized_handle = handle.trim().trim_start_matches('@');
         let profile_url = format!("https://polymarket.com/@{normalized_handle}");
         let html = self
-            .http
-            .get(&profile_url)
-            .send()
+            .send_with_retry(
+                || self.http.get(profile_url.clone()),
+                &format!("resolve profile handle @{normalized_handle}"),
+            )
             .await?
             .error_for_status()?
             .text()
@@ -189,10 +203,75 @@ impl PolymarketClient {
         T: DeserializeOwned,
     {
         let url = format!("{}{}", self.data_api_base_url, path);
-        let response = self.http.get(url).query(params).send().await?;
+        let response = self
+            .send_with_retry(
+                || self.http.get(url.clone()).query(params),
+                &format!("fetch data api path {path}"),
+            )
+            .await?;
         let response = response.error_for_status()?;
         Ok(response.json::<T>().await?)
     }
+
+    async fn send_with_retry<F>(&self, build_request: F, context: &str) -> Result<reqwest::Response>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        let max_attempts = self.retry_attempts().max(1);
+        let mut last_error = None;
+
+        for attempt in 0..max_attempts {
+            match build_request().send().await {
+                Ok(response) => {
+                    if should_retry_status(response.status()) && attempt + 1 < max_attempts {
+                        sleep(self.retry_delay(attempt)).await;
+                        continue;
+                    }
+
+                    return Ok(response);
+                }
+                Err(error) => {
+                    let retryable = is_retryable_request_error(&error);
+                    last_error = Some(error);
+                    if retryable && attempt + 1 < max_attempts {
+                        sleep(self.retry_delay(attempt)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Err(last_error
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow!("request failed without an error")))
+        .with_context(|| format!("{context} after {} attempt(s)", max_attempts))
+    }
+
+    fn retry_attempts(&self) -> usize {
+        self.retry_attempts
+    }
+
+    fn retry_delay(&self, attempt: usize) -> Duration {
+        let base_ms = self.retry_backoff_ms.max(1);
+        let multiplier = 1_u64 << attempt.min(4);
+        Duration::from_millis(base_ms.saturating_mul(multiplier))
+    }
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || status.is_server_error()
+}
+
+fn is_retryable_request_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
 }
 
 pub fn validate_wallet_address(wallet: &str) -> Result<()> {

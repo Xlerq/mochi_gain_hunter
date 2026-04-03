@@ -3,9 +3,11 @@ mod backtest;
 mod config;
 mod domain;
 mod monitor;
+mod paper_runtime;
 mod polymarket;
 mod reporting;
 mod scoring;
+mod service;
 mod simulation;
 mod storage;
 
@@ -23,6 +25,7 @@ use crate::domain::{LeaderboardCategory, LeaderboardOrderBy, LeaderboardTimePeri
 use crate::monitor::run_monitor;
 use crate::polymarket::PolymarketClient;
 use crate::reporting::build_wallet_report;
+use crate::service::run_service;
 
 #[derive(Debug, Parser)]
 #[command(name = "mochi_gain_hunter")]
@@ -66,6 +69,12 @@ enum Commands {
         #[arg(long)]
         cycles: Option<usize>,
     },
+    Service {
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        cycles: Option<usize>,
+    },
     BacktestWallet {
         wallet: String,
         #[arg(long)]
@@ -100,6 +109,7 @@ async fn main() -> Result<()> {
             plain,
             cycles,
         }) => run_monitor(&cli.config, wallet.as_deref(), plain, cycles).await,
+        Some(Commands::Service { once, cycles }) => run_service(&cli.config, once, cycles).await,
         Some(Commands::BacktestWallet {
             wallet,
             top,

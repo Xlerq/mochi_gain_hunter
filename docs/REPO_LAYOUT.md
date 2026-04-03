@@ -8,6 +8,7 @@ Purpose:
 - Rust application source
 - architecture notes
 - roadmap and research summaries
+- service-mode deployment examples
 
 ## Important Constraint
 
