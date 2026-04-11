@@ -9,7 +9,7 @@ retry_attempts = 3
 retry_backoff_ms = 750
 
 [discover]
-category = "POLITICS"
+category = "CRYPTO"
 time_period = "MONTH"
 order_by = "PNL"
 candidate_count = 20
