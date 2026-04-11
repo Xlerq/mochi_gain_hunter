@@ -1,4 +1,4 @@
-# mochi_gain_hunter
+# Mochi Gain Hunter
 
 Rust TUI for researching Polymarket wallets, tracking candidates, and testing copy-trading ideas with a shared paper account.
 
@@ -12,13 +12,10 @@ Rust TUI for researching Polymarket wallets, tracking candidates, and testing co
 
 ## Screenshots
 
-> Put your screenshots in `examples/` with the names below.
-
 <table>
   <tr>
-    <td align="center" width="33%"><img src="examples/leaderboard.png" alt="Leaderboard" width="100%"></td>
-    <td align="center" width="33%"><img src="examples/watchlist.png" alt="Watchlist" width="100%"></td>
-    <td align="center" width="33%"><img src="examples/paper.png" alt="Paper" width="100%"></td>
+    <td align="center" width="50%"><img src="examples/leaderboard.png" alt="Leaderboard" width="100%"></td>
+    <td align="center" width="50%"><img src="examples/paper.png" alt="Paper" width="100%"></td>
   </tr>
 </table>
 
