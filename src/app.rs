@@ -387,7 +387,7 @@ pub async fn run_app(config_path: &Path) -> Result<()> {
                 refresh_deadline = Instant::now();
             }
 
-            if state.refresh_leaderboard && leaderboard_task.is_none() && watchlist_task.is_none() {
+            if state.refresh_leaderboard && leaderboard_task.is_none() {
                 state.refresh_leaderboard = false;
                 state.status_message = "refreshing leaderboard candidates in background".to_owned();
                 leaderboard_task = Some(spawn_leaderboard_refresh(client.clone(), &state));

@@ -97,6 +97,16 @@ wallet = "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
 label = "RN1"
 paper_follow_enabled = true
 
+[[monitor.wallets]]
+wallet = "0x6e1d5040d0ac73709b0621f620d2a60b80d2d0fa"
+label = "0x6E1d5040d0ac73709B0621F620d2a60b80d2D0F"
+paper_follow_enabled = false
+
+[[monitor.wallets]]
+wallet = "0x6e1d5040d0ac73709b0621f620d2a60b80d2d0fa"
+label = "0x6E1d5040d0ac73709B0621F620d2a60b80d2D0F"
+paper_follow_enabled = true
+
 [service]
 poll_interval_secs = 15
 print_heartbeat = true
