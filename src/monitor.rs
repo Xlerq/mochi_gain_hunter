@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use serde::Serialize;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::config::{AppConfig, WatchedWalletConfig};
@@ -78,6 +79,17 @@ struct MonitorRefreshOutcome {
     index: usize,
     watched: ResolvedWatchTarget,
     result: Result<WalletAnalysis>,
+}
+
+#[derive(Debug)]
+struct MonitorStateRefreshResult {
+    rows: Vec<WalletMonitorRow>,
+    paper_book: PaperBookSummary,
+    seen_activity_ids: HashSet<String>,
+    recent_trades: VecDeque<RecentTradeEvent>,
+    refreshed_at: i64,
+    stale_wallets: usize,
+    dropped_wallets: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,29 +214,44 @@ async fn run_tui_monitor(
 
     let mut refresh_deadline = Instant::now();
     let mut completed_cycles = 0usize;
+    let mut refresh_task: Option<JoinHandle<Result<MonitorStateRefreshResult>>> = None;
 
     let run_result = async {
         loop {
-            if completed_cycles == 0
-                || refresh_deadline.elapsed()
-                    >= Duration::from_secs(config.monitor.poll_interval_secs)
-            {
-                state.status_message = "refreshing live wallet data".to_owned();
-                match refresh_state(client, config, watchlist, state).await {
-                    Ok(()) => {}
-                    Err(error) => {
+            if refresh_task.as_ref().is_some_and(|task| task.is_finished()) {
+                let task = refresh_task.take().expect("checked above");
+                match task.await {
+                    Ok(Ok(result)) => apply_monitor_refresh(state, result),
+                    Ok(Err(error)) => {
                         state.status_message =
                             format_status_error("monitor refresh failed", &error);
+                    }
+                    Err(error) => {
+                        state.status_message = format!("monitor refresh task failed: {error}");
                     }
                 }
                 completed_cycles += 1;
                 refresh_deadline = Instant::now();
             }
 
+            let should_refresh = completed_cycles == 0
+                || refresh_deadline.elapsed()
+                    >= Duration::from_secs(config.monitor.poll_interval_secs);
+            if should_refresh && refresh_task.is_none() {
+                state.status_message = "refreshing live wallet data in background".to_owned();
+                refresh_task = Some(spawn_monitor_refresh(
+                    (*client).clone(),
+                    config,
+                    watchlist,
+                    state,
+                ));
+            }
+
             terminal.draw(|frame| draw_dashboard(frame, state))?;
 
             if let Some(max_cycles) = cycles
                 && completed_cycles >= max_cycles
+                && refresh_task.is_none()
             {
                 break;
             }
@@ -254,6 +281,10 @@ async fn run_tui_monitor(
     }
     .await;
 
+    if let Some(task) = refresh_task {
+        task.abort();
+    }
+
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -266,12 +297,61 @@ async fn refresh_state(
     watchlist: &[ResolvedWatchTarget],
     state: &mut MonitorState,
 ) -> Result<()> {
-    let previous_rows = state
+    let result = load_monitor_refresh(
+        client,
+        config,
+        watchlist,
+        previous_monitor_rows(state),
+        state.seen_activity_ids.clone(),
+        state.recent_trades.clone(),
+    )
+    .await?;
+    apply_monitor_refresh(state, result);
+    Ok(())
+}
+
+fn spawn_monitor_refresh(
+    client: PolymarketClient,
+    config: &AppConfig,
+    watchlist: &[ResolvedWatchTarget],
+    state: &MonitorState,
+) -> JoinHandle<Result<MonitorStateRefreshResult>> {
+    let config = config.clone();
+    let watchlist = watchlist.to_vec();
+    let previous_rows = previous_monitor_rows(state);
+    let seen_activity_ids = state.seen_activity_ids.clone();
+    let recent_trades = state.recent_trades.clone();
+
+    tokio::spawn(async move {
+        load_monitor_refresh(
+            &client,
+            &config,
+            &watchlist,
+            previous_rows,
+            seen_activity_ids,
+            recent_trades,
+        )
+        .await
+    })
+}
+
+fn previous_monitor_rows(state: &MonitorState) -> HashMap<String, WalletMonitorRow> {
+    state
         .snapshot
         .wallets
         .iter()
         .map(|row| (row.wallet.clone(), row.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<HashMap<_, _>>()
+}
+
+async fn load_monitor_refresh(
+    client: &PolymarketClient,
+    config: &AppConfig,
+    watchlist: &[ResolvedWatchTarget],
+    previous_rows: HashMap<String, WalletMonitorRow>,
+    mut seen_activity_ids: HashSet<String>,
+    mut recent_trades: VecDeque<RecentTradeEvent>,
+) -> Result<MonitorStateRefreshResult> {
     let mut rows = Vec::with_capacity(watchlist.len());
     let mut paper_book = PaperBookSummary {
         wallet_count: watchlist.len(),
@@ -326,8 +406,8 @@ async fn refresh_state(
             .unwrap_or_else(|| shorten_wallet(&watched.wallet));
 
         let tracked_trade_count = record_recent_trades(
-            &mut state.seen_activity_ids,
-            &mut state.recent_trades,
+            &mut seen_activity_ids,
+            &mut recent_trades,
             &label,
             &watched.wallet,
             &analysis.activities,
@@ -359,24 +439,36 @@ async fn refresh_state(
         paper_book.total_starting_cash += report.simulation.starting_cash;
     }
 
-    state.snapshot.last_refresh_timestamp = Some(now_ts());
-    state.snapshot.paper_book = paper_book;
-    state.snapshot.wallets = rows;
+    Ok(MonitorStateRefreshResult {
+        rows,
+        paper_book,
+        seen_activity_ids,
+        recent_trades,
+        refreshed_at: now_ts(),
+        stale_wallets,
+        dropped_wallets,
+    })
+}
+
+fn apply_monitor_refresh(state: &mut MonitorState, result: MonitorStateRefreshResult) {
+    state.snapshot.last_refresh_timestamp = Some(result.refreshed_at);
+    state.snapshot.paper_book = result.paper_book;
+    state.snapshot.wallets = result.rows;
+    state.seen_activity_ids = result.seen_activity_ids;
+    state.recent_trades = result.recent_trades;
     sort_recent_trades(&mut state.recent_trades);
     state.snapshot.recent_trades = state.recent_trades.iter().cloned().collect();
     if state.selected_wallet >= state.snapshot.wallets.len() {
         state.selected_wallet = state.snapshot.wallets.len().saturating_sub(1);
     }
-    state.status_message = if stale_wallets == 0 && dropped_wallets == 0 {
+    state.status_message = if result.stale_wallets == 0 && result.dropped_wallets == 0 {
         "live monitor ready".to_owned()
     } else {
         format!(
             "live monitor ready | stale {} | dropped {}",
-            stale_wallets, dropped_wallets
+            result.stale_wallets, result.dropped_wallets
         )
     };
-
-    Ok(())
 }
 
 fn accumulate_paper_book_from_row(paper_book: &mut PaperBookSummary, row: &WalletMonitorRow) {

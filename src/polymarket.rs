@@ -12,6 +12,7 @@ use crate::domain::{
     LeaderboardTimePeriod, Position, WalletActivity,
 };
 
+#[derive(Clone)]
 pub struct PolymarketClient {
     http: Client,
     data_api_base_url: String,

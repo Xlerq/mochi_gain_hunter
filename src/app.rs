@@ -16,6 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
+use tokio::task::JoinHandle;
 
 use crate::config::{AppConfig, WatchedWalletConfig};
 use crate::domain::{
@@ -122,10 +123,25 @@ struct PaperDashboard {
 }
 
 #[derive(Debug)]
+struct WatchlistRefreshResult {
+    rows: Vec<WatchedWalletRow>,
+    paper_dashboard: PaperDashboard,
+    refreshed_at: i64,
+    stale_wallets: usize,
+    dropped_wallets: usize,
+}
+
+#[derive(Debug)]
 struct WatchlistRefreshOutcome {
     config_index: usize,
     watched: WatchedWalletConfig,
     result: Result<ResolvedWalletAnalysis>,
+}
+
+#[derive(Debug)]
+struct LeaderboardRefreshResult {
+    rows: Vec<LeaderboardRow>,
+    refreshed_at: i64,
 }
 
 #[derive(Debug)]
@@ -321,35 +337,60 @@ pub async fn run_app(config_path: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut refresh_deadline = Instant::now() - Duration::from_secs(3600);
+    let mut watchlist_task: Option<JoinHandle<Result<WatchlistRefreshResult>>> = None;
+    let mut leaderboard_task: Option<JoinHandle<Result<LeaderboardRefreshResult>>> = None;
 
     let run_result = async {
         loop {
+            if watchlist_task
+                .as_ref()
+                .is_some_and(|task| task.is_finished())
+            {
+                let task = watchlist_task.take().expect("checked above");
+                match task.await {
+                    Ok(Ok(result)) => apply_watchlist_refresh(&mut state, result),
+                    Ok(Err(error)) => {
+                        state.status_message =
+                            format_status_error("watchlist refresh failed", &error);
+                    }
+                    Err(error) => {
+                        state.status_message = format!("watchlist refresh task failed: {error}");
+                    }
+                }
+            }
+
+            if leaderboard_task
+                .as_ref()
+                .is_some_and(|task| task.is_finished())
+            {
+                let task = leaderboard_task.take().expect("checked above");
+                match task.await {
+                    Ok(Ok(result)) => apply_leaderboard_refresh(&mut state, result),
+                    Ok(Err(error)) => {
+                        state.status_message =
+                            format_status_error("leaderboard refresh failed", &error);
+                    }
+                    Err(error) => {
+                        state.status_message = format!("leaderboard refresh task failed: {error}");
+                    }
+                }
+            }
+
             let should_refresh_watchlist = state.refresh_watchlist
                 || refresh_deadline.elapsed()
                     >= Duration::from_secs(state.config.monitor.poll_interval_secs);
-            if should_refresh_watchlist {
-                state.status_message = "refreshing watchlist and paper book".to_owned();
-                match refresh_watchlist(&client, &mut state).await {
-                    Ok(()) => {}
-                    Err(error) => {
-                        state.status_message =
-                            format_status_error("watchlist refresh failed", &error);
-                        state.refresh_watchlist = false;
-                    }
-                }
+            if should_refresh_watchlist && watchlist_task.is_none() {
+                state.refresh_watchlist = false;
+                state.status_message =
+                    "refreshing watchlist and paper book in background".to_owned();
+                watchlist_task = Some(spawn_watchlist_refresh(client.clone(), &state));
                 refresh_deadline = Instant::now();
             }
 
-            if state.refresh_leaderboard {
-                state.status_message = "refreshing leaderboard candidates".to_owned();
-                match refresh_leaderboard(&client, &mut state).await {
-                    Ok(()) => {}
-                    Err(error) => {
-                        state.status_message =
-                            format_status_error("leaderboard refresh failed", &error);
-                        state.refresh_leaderboard = false;
-                    }
-                }
+            if state.refresh_leaderboard && leaderboard_task.is_none() && watchlist_task.is_none() {
+                state.refresh_leaderboard = false;
+                state.status_message = "refreshing leaderboard candidates in background".to_owned();
+                leaderboard_task = Some(spawn_leaderboard_refresh(client.clone(), &state));
             }
 
             terminal.draw(|frame| draw_app(frame, &state))?;
@@ -470,22 +511,43 @@ pub async fn run_app(config_path: &Path) -> Result<()> {
     }
     .await;
 
+    if let Some(task) = watchlist_task {
+        task.abort();
+    }
+    if let Some(task) = leaderboard_task {
+        task.abort();
+    }
+
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     run_result
 }
 
-async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> Result<()> {
+fn spawn_watchlist_refresh(
+    client: PolymarketClient,
+    state: &AppState,
+) -> JoinHandle<Result<WatchlistRefreshResult>> {
+    let config = state.config.clone();
     let previous_rows = state
         .watchlist_rows
         .iter()
         .map(|row| (row.config_index, row.clone()))
         .collect::<HashMap<_, _>>();
-    let concurrency = state.config.http.max_concurrent_requests.max(1);
-    let mut outcomes = stream::iter(state.config.monitor.wallets.iter().cloned().enumerate())
+
+    tokio::spawn(async move { load_watchlist_refresh(client, config, previous_rows).await })
+}
+
+async fn load_watchlist_refresh(
+    client: PolymarketClient,
+    config: AppConfig,
+    previous_rows: HashMap<usize, WatchedWalletRow>,
+) -> Result<WatchlistRefreshResult> {
+    let concurrency = config.http.max_concurrent_requests.max(1);
+    let mut outcomes = stream::iter(config.monitor.wallets.iter().cloned().enumerate())
         .map(|(config_index, watched)| {
-            let config = &state.config;
+            let config = &config;
+            let client = &client;
             async move {
                 let result = build_resolved_wallet_analysis(client, config, &watched.wallet).await;
                 WatchlistRefreshOutcome {
@@ -509,7 +571,7 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
         let watched = outcome.watched;
         let ResolvedWalletAnalysis { resolved, analysis } = match outcome.result {
             Ok(result) => result,
-            Err(error) => {
+            Err(_) => {
                 if let Some(previous) = previous_rows.get(&config_index) {
                     let mut stale_row = previous.clone();
                     stale_row.paper_follow_enabled = watched.paper_follow_enabled;
@@ -518,10 +580,6 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
                     continue;
                 }
                 dropped_wallets += 1;
-                state.status_message = format_status_error(
-                    &format!("wallet refresh failed for {}", watched.wallet),
-                    &error,
-                );
                 continue;
             }
         };
@@ -534,7 +592,7 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
             .unwrap_or_else(|| shorten_wallet(&resolved.wallet));
 
         persist_wallet_tracking(
-            &state.config,
+            &config,
             &label,
             &resolved.wallet,
             &analysis.report,
@@ -550,41 +608,24 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
         });
     }
 
-    state.watchlist_rows = rows;
+    let paper_dashboard = build_paper_dashboard(&rows, &config)?;
+
+    Ok(WatchlistRefreshResult {
+        rows,
+        paper_dashboard,
+        refreshed_at: now_ts(),
+        stale_wallets,
+        dropped_wallets,
+    })
+}
+
+fn apply_watchlist_refresh(state: &mut AppState, result: WatchlistRefreshResult) {
+    state.watchlist_rows = result.rows;
     state.watchlist_selected = move_index(state.watchlist_selected, state.watchlist_rows.len(), 0);
-    state.paper_dashboard = build_paper_dashboard(&state.watchlist_rows, &state.config)?;
-    state.last_refresh_timestamp = Some(now_ts());
-    state.status_message = if state.watchlist_rows.is_empty() {
-        "watchlist is empty".to_owned()
-    } else if !state
-        .watchlist_rows
-        .iter()
-        .any(|row| row.paper_follow_enabled)
-    {
-        format!(
-            "watchlist refreshed: {} wallet(s) | paper follow disabled",
-            state.watchlist_rows.len()
-        )
-    } else {
-        let mut summary = format!(
-            "watchlist refreshed: {} wallet(s) | paper {} | {} new trade(s)",
-            state.watchlist_rows.len(),
-            if state.paper_dashboard.resumed_journal {
-                "resumed"
-            } else {
-                "rebuilt"
-            },
-            state.paper_dashboard.processed_activity_count
-        );
-        if stale_wallets > 0 {
-            summary.push_str(&format!(" | stale {}", stale_wallets));
-        }
-        if dropped_wallets > 0 {
-            summary.push_str(&format!(" | dropped {}", dropped_wallets));
-        }
-        summary
-    };
-    state.refresh_watchlist = false;
+    state.paper_dashboard = result.paper_dashboard;
+    state.last_refresh_timestamp = Some(result.refreshed_at);
+    state.status_message =
+        watchlist_refresh_status(state, result.stale_wallets, result.dropped_wallets);
 
     if let Some(detail) = &mut state.wallet_detail
         && let Some(row) = state
@@ -598,31 +639,81 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
         detail.analysis = row.analysis.clone();
         detail.source = "Watchlist".to_owned();
     }
-
-    Ok(())
 }
 
-async fn refresh_leaderboard(client: &PolymarketClient, state: &mut AppState) -> Result<()> {
-    let leaderboard = client
-        .leaderboard(
-            state.config.discover.category,
-            state.config.discover.time_period,
-            state.config.discover.order_by,
-            state.config.discover.candidate_count,
-            0,
-        )
-        .await?;
+fn watchlist_refresh_status(
+    state: &AppState,
+    stale_wallets: usize,
+    dropped_wallets: usize,
+) -> String {
+    if state.watchlist_rows.is_empty() {
+        return "watchlist is empty".to_owned();
+    }
 
+    if !state
+        .watchlist_rows
+        .iter()
+        .any(|row| row.paper_follow_enabled)
+    {
+        return format!(
+            "watchlist refreshed: {} wallet(s) | paper follow disabled",
+            state.watchlist_rows.len()
+        );
+    }
+
+    let mut summary = format!(
+        "watchlist refreshed: {} wallet(s) | paper {} | {} new trade(s)",
+        state.watchlist_rows.len(),
+        if state.paper_dashboard.resumed_journal {
+            "resumed"
+        } else {
+            "rebuilt"
+        },
+        state.paper_dashboard.processed_activity_count
+    );
+    if stale_wallets > 0 {
+        summary.push_str(&format!(" | stale {}", stale_wallets));
+    }
+    if dropped_wallets > 0 {
+        summary.push_str(&format!(" | dropped {}", dropped_wallets));
+    }
+    summary
+}
+
+fn spawn_leaderboard_refresh(
+    client: PolymarketClient,
+    state: &AppState,
+) -> JoinHandle<Result<LeaderboardRefreshResult>> {
+    let config = state.config.clone();
     let watch_map = state
         .watchlist_rows
         .iter()
         .map(|row| (row.wallet.clone(), row.paper_follow_enabled))
         .collect::<HashMap<_, _>>();
 
-    let concurrency = state.config.http.max_concurrent_requests.max(1);
+    tokio::spawn(async move { load_leaderboard_refresh(client, config, watch_map).await })
+}
+
+async fn load_leaderboard_refresh(
+    client: PolymarketClient,
+    config: AppConfig,
+    watch_map: HashMap<String, bool>,
+) -> Result<LeaderboardRefreshResult> {
+    let leaderboard = client
+        .leaderboard(
+            config.discover.category,
+            config.discover.time_period,
+            config.discover.order_by,
+            config.discover.candidate_count,
+            0,
+        )
+        .await?;
+
+    let concurrency = config.http.max_concurrent_requests.max(1);
     let mut outcomes = stream::iter(leaderboard.into_iter().enumerate())
         .map(|(index, entry)| {
-            let config = &state.config;
+            let config = &config;
+            let client = &client;
             async move {
                 let wallet = entry.proxy_wallet.to_ascii_lowercase();
                 let report =
@@ -664,17 +755,22 @@ async fn refresh_leaderboard(client: &PolymarketClient, state: &mut AppState) ->
         });
     }
 
-    state.leaderboard_rows = rows;
+    Ok(LeaderboardRefreshResult {
+        rows,
+        refreshed_at: now_ts(),
+    })
+}
+
+fn apply_leaderboard_refresh(state: &mut AppState, result: LeaderboardRefreshResult) {
+    state.leaderboard_rows = result.rows;
     state.leaderboard_selected =
         move_index(state.leaderboard_selected, state.leaderboard_rows.len(), 0);
-    state.last_refresh_timestamp = Some(now_ts());
+    state.last_refresh_timestamp = Some(result.refreshed_at);
     state.status_message = format!(
         "leaderboard refreshed: {} {:?} wallets",
         state.leaderboard_rows.len(),
         state.config.discover.category
     );
-    state.refresh_leaderboard = false;
-    Ok(())
 }
 
 fn build_paper_dashboard(rows: &[WatchedWalletRow], config: &AppConfig) -> Result<PaperDashboard> {
