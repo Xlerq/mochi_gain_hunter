@@ -749,6 +749,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "futures-util",
  "ratatui",
  "reqwest",
  "serde",

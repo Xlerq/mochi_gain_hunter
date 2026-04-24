@@ -28,12 +28,15 @@ pub fn score_wallet(
         .iter()
         .filter(|activity| now.saturating_sub(activity.timestamp) <= 30 * 24 * 60 * 60)
         .count();
-    let average_trade_usdc = average(
-        &trade_activities
+    let average_trade_usdc = if trade_count == 0 {
+        0.0
+    } else {
+        trade_activities
             .iter()
             .map(|activity| activity.usdc_size)
-            .collect::<Vec<_>>(),
-    );
+            .sum::<f64>()
+            / trade_count as f64
+    };
     let realized_pnl_total = closed_positions
         .iter()
         .map(|position| position.realized_pnl)
@@ -201,14 +204,6 @@ pub fn score_wallet(
             last_trade_timestamp,
         },
         components,
-    }
-}
-
-fn average(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        0.0
-    } else {
-        values.iter().sum::<f64>() / values.len() as f64
     }
 }
 

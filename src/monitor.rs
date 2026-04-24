@@ -9,6 +9,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -23,7 +24,7 @@ use crate::domain::{
     FollowRecommendation, TradeSide, WalletActivity, WalletActivityType, WalletReport,
 };
 use crate::polymarket::PolymarketClient;
-use crate::reporting::build_wallet_analysis;
+use crate::reporting::{WalletAnalysis, build_wallet_analysis};
 use crate::storage::persist_wallet_tracking;
 
 #[derive(Debug, Clone)]
@@ -70,6 +71,13 @@ struct RecentTradeEvent {
     price: f64,
     usdc_size: f64,
     slug: Option<String>,
+}
+
+#[derive(Debug)]
+struct MonitorRefreshOutcome {
+    index: usize,
+    watched: ResolvedWatchTarget,
+    result: Result<WalletAnalysis>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,31 +223,29 @@ async fn run_tui_monitor(
 
             terminal.draw(|frame| draw_dashboard(frame, state))?;
 
-            if let Some(max_cycles) = cycles {
-                if completed_cycles >= max_cycles {
-                    break;
-                }
+            if let Some(max_cycles) = cycles
+                && completed_cycles >= max_cycles
+            {
+                break;
             }
 
-            if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') => break,
-                            KeyCode::Char('r') => {
-                                refresh_deadline = Instant::now()
-                                    - Duration::from_secs(config.monitor.poll_interval_secs);
-                            }
-                            KeyCode::Up | KeyCode::Char('k') => move_selection(state, -1),
-                            KeyCode::Down | KeyCode::Char('j') => move_selection(state, 1),
-                            KeyCode::Char('g') => state.selected_wallet = 0,
-                            KeyCode::Char('G') => {
-                                state.selected_wallet =
-                                    state.snapshot.wallets.len().saturating_sub(1);
-                            }
-                            _ => {}
-                        }
+            if event::poll(Duration::from_millis(250))?
+                && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('r') => {
+                        refresh_deadline =
+                            Instant::now() - Duration::from_secs(config.monitor.poll_interval_secs);
                     }
+                    KeyCode::Up | KeyCode::Char('k') => move_selection(state, -1),
+                    KeyCode::Down | KeyCode::Char('j') => move_selection(state, 1),
+                    KeyCode::Char('g') => state.selected_wallet = 0,
+                    KeyCode::Char('G') => {
+                        state.selected_wallet = state.snapshot.wallets.len().saturating_sub(1);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -282,8 +288,24 @@ async fn refresh_state(
     let mut stale_wallets = 0usize;
     let mut dropped_wallets = 0usize;
 
-    for watched in watchlist {
-        let analysis = match build_wallet_analysis(client, config, &watched.wallet, None).await {
+    let concurrency = config.http.max_concurrent_requests.max(1);
+    let mut outcomes = stream::iter(watchlist.iter().cloned().enumerate())
+        .map(|(index, watched)| async move {
+            let result = build_wallet_analysis(client, config, &watched.wallet, None).await;
+            MonitorRefreshOutcome {
+                index,
+                watched,
+                result,
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    outcomes.sort_by_key(|outcome| outcome.index);
+
+    for outcome in outcomes {
+        let watched = outcome.watched;
+        let analysis = match outcome.result {
             Ok(analysis) => analysis,
             Err(_) => {
                 if let Some(previous) = previous_rows.get(&watched.wallet) {
@@ -382,10 +404,20 @@ async fn resolve_watchlist(
         }]);
     }
 
-    let mut watchlist = Vec::new();
-    for watched in &config.monitor.wallets {
-        watchlist.push(resolve_watched_target(client, watched).await?);
-    }
+    let concurrency = config.http.max_concurrent_requests.max(1);
+    let mut watchlist = stream::iter(config.monitor.wallets.iter().cloned().enumerate())
+        .map(|(index, watched)| async move {
+            let target = resolve_watched_target(client, &watched).await?;
+            Ok::<_, anyhow::Error>((index, target))
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
+    watchlist.sort_by_key(|(index, _)| *index);
+    let watchlist = watchlist
+        .into_iter()
+        .map(|(_, target)| target)
+        .collect::<Vec<_>>();
 
     if watchlist.is_empty() {
         bail!("no wallets configured for monitoring");

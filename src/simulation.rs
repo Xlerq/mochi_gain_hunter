@@ -1052,6 +1052,14 @@ fn process_due_orders(
     config: &SimulationConfig,
     state: &mut EngineState,
 ) {
+    if !state
+        .pending_orders
+        .iter()
+        .any(|order| order.scheduled_timestamp <= up_to_timestamp)
+    {
+        return;
+    }
+
     let mut due_orders = Vec::new();
     let mut remaining_orders = Vec::with_capacity(state.pending_orders.len());
 
@@ -1535,9 +1543,14 @@ fn build_portfolio_report(
         .sum::<f64>();
     let final_equity = state.cash + deployed_market_value;
 
-    let mut recent_executions = state.executions.clone();
+    let mut recent_executions = state
+        .executions
+        .iter()
+        .rev()
+        .take(RECENT_EXECUTION_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
     recent_executions.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
-    recent_executions.truncate(RECENT_EXECUTION_LIMIT);
 
     let mut closed_positions = state.closed_positions.clone();
     closed_positions.sort_by(|left, right| right.sell_timestamp.cmp(&left.sell_timestamp));
@@ -1835,7 +1848,6 @@ mod tests {
             max_wallet_exposure_ratio: 1.0,
             max_open_positions: 10,
             starting_cash: 100.0,
-            ..SimulationConfig::default()
         };
 
         let report = simulate_copy_trading(wallet, &activities, &HashMap::new(), &config);
@@ -2040,7 +2052,6 @@ mod tests {
             max_wallet_exposure_ratio: 1.0,
             max_open_positions: 10,
             starting_cash: 100.0,
-            ..SimulationConfig::default()
         };
 
         let report = simulate_copy_trading(wallet, &activities, &HashMap::new(), &config);
@@ -2115,7 +2126,6 @@ mod tests {
             max_wallet_exposure_ratio: 1.0,
             max_open_positions: 10,
             starting_cash: 100.0,
-            ..SimulationConfig::default()
         };
         let metadata = ForwardPaperJournalMetadata {
             enabled_wallets: vec![wallet.to_owned()],
@@ -2212,7 +2222,6 @@ mod tests {
             max_wallet_exposure_ratio: 1.0,
             max_open_positions: 10,
             starting_cash: 100.0,
-            ..SimulationConfig::default()
         };
 
         let report = simulate_copy_trading(
@@ -2265,7 +2274,6 @@ mod tests {
             max_wallet_exposure_ratio: 1.0,
             max_open_positions: 10,
             starting_cash: 100.0,
-            ..SimulationConfig::default()
         };
 
         let report = simulate_copy_trading(

@@ -7,6 +7,7 @@ request_timeout_secs = 30
 connect_timeout_secs = 10
 retry_attempts = 3
 retry_backoff_ms = 750
+max_concurrent_requests = 6
 
 [discover]
 category = "CRYPTO"

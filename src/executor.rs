@@ -66,7 +66,7 @@ pub trait ExecutionGateway {
 
 pub fn build_executor(config: &AppConfig) -> Box<dyn ExecutionGateway> {
     match config.execution.mode {
-        ExecutionMode::Disabled => Box::new(DisabledExecutor::default()),
+        ExecutionMode::Disabled => Box::new(DisabledExecutor),
         ExecutionMode::Paper => Box::new(PaperExecutionRecorder::new(
             Path::new(&config.storage.data_dir),
             config.execution.print_to_stdout,

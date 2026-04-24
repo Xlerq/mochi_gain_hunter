@@ -6,10 +6,11 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
 use tokio::time::sleep;
 
-use crate::config::{AlertConfig, AppConfig};
+use crate::config::{AlertConfig, AppConfig, WatchedWalletConfig};
 use crate::domain::{
     PortfolioSimulationExecution, PortfolioSimulationReport, SimulationExecutionStatus,
 };
@@ -18,7 +19,7 @@ use crate::paper_runtime::{
     PaperRuntimeProgress, PaperRuntimeWalletInput, build_shared_paper_runtime,
 };
 use crate::polymarket::PolymarketClient;
-use crate::reporting::{WalletAnalysis, build_wallet_analysis};
+use crate::reporting::{ResolvedWalletAnalysis, WalletAnalysis, build_resolved_wallet_analysis};
 use crate::storage::persist_wallet_tracking;
 
 const DESKTOP_ALERT_LIMIT_PER_CYCLE: usize = 5;
@@ -39,6 +40,13 @@ struct ServiceCycleOutcome {
     stale_wallets: usize,
     dropped_wallets: usize,
     warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ServiceRefreshOutcome {
+    config_index: usize,
+    watched: WatchedWalletConfig,
+    result: Result<ResolvedWalletAnalysis>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,41 +255,34 @@ async fn run_service_cycle(
     config: &AppConfig,
     previous_rows: &HashMap<usize, ServiceWalletRow>,
 ) -> Result<ServiceCycleOutcome> {
-    let mut rows = Vec::new();
+    let concurrency = config.http.max_concurrent_requests.max(1);
+    let mut outcomes = stream::iter(config.monitor.wallets.iter().cloned().enumerate())
+        .map(|(config_index, watched)| async move {
+            let result = build_resolved_wallet_analysis(client, config, &watched.wallet).await;
+            ServiceRefreshOutcome {
+                config_index,
+                watched,
+                result,
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    outcomes.sort_by_key(|outcome| outcome.config_index);
+
+    let mut rows = Vec::with_capacity(outcomes.len());
     let mut warnings = Vec::new();
     let mut stale_wallets = 0usize;
     let mut dropped_wallets = 0usize;
 
-    for (config_index, watched) in config.monitor.wallets.iter().enumerate() {
-        let resolved = match client.resolve_wallet_input(&watched.wallet).await {
-            Ok(resolved) => resolved,
+    for outcome in outcomes {
+        let config_index = outcome.config_index;
+        let watched = outcome.watched;
+        let ResolvedWalletAnalysis { resolved, analysis } = match outcome.result {
+            Ok(result) => result,
             Err(error) => {
                 if let Some(previous) = previous_rows.get(&config_index) {
                     let mut stale = previous.clone();
-                    stale.paper_follow_enabled = watched.paper_follow_enabled;
-                    rows.push(stale);
-                    stale_wallets += 1;
-                    warnings.push(format_status_error(
-                        &format!("wallet resolve failed for {}", watched.wallet),
-                        &error,
-                    ));
-                    continue;
-                }
-                dropped_wallets += 1;
-                warnings.push(format_status_error(
-                    &format!("wallet resolve failed for {}", watched.wallet),
-                    &error,
-                ));
-                continue;
-            }
-        };
-
-        let analysis = match build_wallet_analysis(client, config, &resolved.wallet, None).await {
-            Ok(analysis) => analysis,
-            Err(error) => {
-                if let Some(previous) = previous_rows.get(&config_index) {
-                    let mut stale = previous.clone();
-                    stale.wallet = resolved.wallet;
                     stale.paper_follow_enabled = watched.paper_follow_enabled;
                     rows.push(stale);
                     stale_wallets += 1;

@@ -299,10 +299,10 @@ pub fn extract_profile_handle(input: &str) -> Option<String> {
         return Some(trimmed[start..].split(['/', '?', '#']).next()?.to_owned());
     }
 
-    if let Some(handle) = trimmed.strip_prefix('@') {
-        if !handle.is_empty() {
-            return Some(handle.to_owned());
-        }
+    if let Some(handle) = trimmed.strip_prefix('@')
+        && !handle.is_empty()
+    {
+        return Some(handle.to_owned());
     }
 
     if !trimmed.is_empty()

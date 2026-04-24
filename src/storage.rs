@@ -179,8 +179,9 @@ pub fn persist_forward_paper_journal(
     let history_dir = paper_dir.join("history");
     fs::create_dir_all(&history_dir)?;
 
+    let captured_at = now_ts();
     let state_record = StoredForwardPaperJournalState {
-        captured_at: now_ts(),
+        captured_at,
         state: state.clone(),
     };
     let state_path = paper_dir.join("forward_state.json");
@@ -195,7 +196,7 @@ pub fn persist_forward_paper_journal(
 
         for execution in new_executions {
             let record = StoredPaperExecutionRecord {
-                captured_at: now_ts(),
+                captured_at,
                 execution: execution.clone(),
             };
             writeln!(journal_file, "{}", serde_json::to_string(&record)?)?;
@@ -249,6 +250,23 @@ fn append_activity_log(data_dir: &Path, wallet: &str, activities: &[WalletActivi
     fs::create_dir_all(&activities_dir)?;
     let path = activity_log_path(data_dir, wallet);
 
+    let mut pending_keys = HashSet::new();
+    let mut pending_records = Vec::new();
+    for activity in activities {
+        if !matches!(activity.activity_type, WalletActivityType::Trade) {
+            continue;
+        }
+
+        let activity_key = activity_key(wallet, activity);
+        if pending_keys.insert(activity_key.clone()) {
+            pending_records.push((activity_key, activity));
+        }
+    }
+
+    if pending_records.is_empty() {
+        return Ok(());
+    }
+
     let mut known_ids = HashSet::new();
     if path.exists() {
         let file = fs::File::open(&path)?;
@@ -257,22 +275,23 @@ fn append_activity_log(data_dir: &Path, wallet: &str, activities: &[WalletActivi
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(record) = serde_json::from_str::<StoredActivityRecord>(&line) {
+            if let Ok(record) = serde_json::from_str::<StoredActivityRecord>(&line)
+                && pending_keys.contains(record.activity_key.as_str())
+            {
                 known_ids.insert(record.activity_key);
+                if known_ids.len() == pending_keys.len() {
+                    break;
+                }
             }
         }
     }
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    for activity in activities {
-        if !matches!(activity.activity_type, WalletActivityType::Trade) {
-            continue;
-        }
-
-        let activity_key = activity_key(wallet, activity);
+    let captured_at = now_ts();
+    for (activity_key, activity) in pending_records {
         if known_ids.insert(activity_key.clone()) {
             let record = StoredActivityRecord {
-                captured_at: now_ts(),
+                captured_at,
                 activity_key,
                 wallet: wallet.to_owned(),
                 activity: activity.clone(),

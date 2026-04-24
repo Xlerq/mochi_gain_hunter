@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Serialize;
 
 use crate::app::run_app;
@@ -166,11 +167,19 @@ async fn discover_wallets(
         )
         .await?;
 
-    let mut reports = Vec::with_capacity(leaderboard.len());
-    for entry in leaderboard {
-        let wallet = entry.proxy_wallet.clone();
-        reports.push(build_wallet_report(&client, &config, &wallet, Some(entry)).await?);
-    }
+    let concurrency = config.http.max_concurrent_requests.max(1);
+    let mut reports = stream::iter(leaderboard)
+        .map(|entry| {
+            let client = &client;
+            let config = &config;
+            async move {
+                let wallet = entry.proxy_wallet.clone();
+                build_wallet_report(client, config, &wallet, Some(entry)).await
+            }
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
 
     reports.sort_by(|left, right| {
         right

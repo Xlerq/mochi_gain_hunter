@@ -91,6 +91,8 @@ pub struct HttpConfig {
     pub retry_attempts: usize,
     #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
 }
 
 impl Default for HttpConfig {
@@ -100,6 +102,7 @@ impl Default for HttpConfig {
             connect_timeout_secs: default_connect_timeout_secs(),
             retry_attempts: default_retry_attempts(),
             retry_backoff_ms: default_retry_backoff_ms(),
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }
@@ -326,18 +329,13 @@ impl Default for AlertConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExecutionMode {
     Disabled,
+    #[default]
     Paper,
     LiveDryRun,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::Paper
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +464,10 @@ fn default_retry_attempts() -> usize {
 
 fn default_retry_backoff_ms() -> u64 {
     750
+}
+
+fn default_max_concurrent_requests() -> usize {
+    6
 }
 
 fn default_activity_limit() -> usize {

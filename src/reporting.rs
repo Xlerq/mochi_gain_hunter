@@ -1,19 +1,38 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use futures_util::{StreamExt, stream};
 use tokio::try_join;
 
 use crate::config::AppConfig;
 use crate::domain::{LeaderboardEntry, WalletActivity, WalletReport};
-use crate::polymarket::PolymarketClient;
+use crate::polymarket::{PolymarketClient, ResolvedWallet};
 use crate::scoring::score_wallet;
 use crate::simulation::simulate_copy_trading;
+
+const MISSING_MARK_LOOKUP_LIMIT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct WalletAnalysis {
     pub report: WalletReport,
     pub activities: Vec<WalletActivity>,
     pub current_marks: HashMap<String, f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedWalletAnalysis {
+    pub resolved: ResolvedWallet,
+    pub analysis: WalletAnalysis,
+}
+
+pub async fn build_resolved_wallet_analysis(
+    client: &PolymarketClient,
+    config: &AppConfig,
+    wallet_input: &str,
+) -> Result<ResolvedWalletAnalysis> {
+    let resolved = client.resolve_wallet_input(wallet_input).await?;
+    let analysis = build_wallet_analysis(client, config, &resolved.wallet, None).await?;
+    Ok(ResolvedWalletAnalysis { resolved, analysis })
 }
 
 pub async fn build_wallet_analysis(
@@ -35,16 +54,34 @@ pub async fn build_wallet_analysis(
         }
     }
 
+    let mut seen_missing_assets = HashSet::new();
     let missing_mark_assets = activities
         .iter()
-        .filter(|activity| !activity.asset.is_empty())
-        .filter(|activity| !current_marks.contains_key(&activity.asset))
-        .map(|activity| activity.asset.clone())
+        .filter_map(|activity| {
+            if activity.asset.is_empty()
+                || current_marks.contains_key(&activity.asset)
+                || !seen_missing_assets.insert(activity.asset.as_str())
+            {
+                return None;
+            }
+            Some(activity.asset.clone())
+        })
+        .take(MISSING_MARK_LOOKUP_LIMIT)
         .collect::<Vec<_>>();
 
-    for asset in missing_mark_assets.iter().take(5) {
-        if let Some(price) = client.midpoint_price(asset).await? {
-            current_marks.insert(asset.clone(), price);
+    let midpoint_results = stream::iter(missing_mark_assets)
+        .map(|asset| async move {
+            let price = client.midpoint_price(&asset).await?;
+            Ok::<_, anyhow::Error>((asset, price))
+        })
+        .buffer_unordered(config.http.max_concurrent_requests.max(1))
+        .collect::<Vec<_>>()
+        .await;
+
+    for result in midpoint_results {
+        let (asset, price) = result?;
+        if let Some(price) = price {
+            current_marks.insert(asset, price);
         }
     }
 

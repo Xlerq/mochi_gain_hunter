@@ -9,6 +9,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -25,7 +26,10 @@ use crate::domain::{
 };
 use crate::paper_runtime::{PaperRuntimeWalletInput, build_shared_paper_runtime};
 use crate::polymarket::PolymarketClient;
-use crate::reporting::{WalletAnalysis, build_wallet_analysis, build_wallet_report};
+use crate::reporting::{
+    ResolvedWalletAnalysis, WalletAnalysis, build_resolved_wallet_analysis, build_wallet_analysis,
+    build_wallet_report,
+};
 use crate::storage::persist_wallet_tracking;
 
 const LEADERBOARD_CATEGORIES: [LeaderboardCategory; 3] = [
@@ -115,6 +119,21 @@ struct PaperDashboard {
     recent_executions: Vec<PortfolioSimulationExecution>,
     processed_activity_count: usize,
     resumed_journal: bool,
+}
+
+#[derive(Debug)]
+struct WatchlistRefreshOutcome {
+    config_index: usize,
+    watched: WatchedWalletConfig,
+    result: Result<ResolvedWalletAnalysis>,
+}
+
+#[derive(Debug)]
+struct LeaderboardRefreshOutcome {
+    index: usize,
+    entry: LeaderboardEntry,
+    wallet: String,
+    report: WalletReport,
 }
 
 impl PaperDashboard {
@@ -335,120 +354,114 @@ pub async fn run_app(config_path: &Path) -> Result<()> {
 
             terminal.draw(|frame| draw_app(frame, &state))?;
 
-            if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
+            if event::poll(Duration::from_millis(200))?
+                && let Event::Key(key) = event::read()?
+            {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
-                    if let Some(menu) = &mut state.action_menu {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') => state.action_menu = None,
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                menu.selected = move_index(menu.selected, menu.actions.len(), -1)
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                menu.selected = move_index(menu.selected, menu.actions.len(), 1)
-                            }
-                            KeyCode::Enter => {
-                                let action = menu.actions.get(menu.selected).cloned();
-                                let context = menu.context.clone();
-                                state.action_menu = None;
-                                if let Some(action) = action {
-                                    if let Err(error) =
-                                        perform_action(&client, &mut state, context, action).await
-                                    {
-                                        state.status_message =
-                                            format_status_error("wallet action failed", &error);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
+                if let Some(menu) = &mut state.action_menu {
                     match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => {
-                            state.previous_tab();
+                        KeyCode::Esc | KeyCode::Char('q') => state.action_menu = None,
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            menu.selected = move_index(menu.selected, menu.actions.len(), -1)
                         }
-                        KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => {
-                            state.next_tab();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
-                        KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
-                        KeyCode::Char('g') => state.jump_to_start(),
-                        KeyCode::Char('G') => state.jump_to_end(),
-                        KeyCode::Char('r') => {
-                            queue_refresh_for_active_tab(&mut state);
-                        }
-                        KeyCode::Char('c') if state.active_tab == AppTab::Leaderboard => {
-                            cycle_leaderboard_category(&mut state.config);
-                            match state.config.write_to_path(&state.config_path) {
-                                Ok(()) => state.refresh_leaderboard = true,
-                                Err(error) => {
-                                    state.status_message =
-                                        format_status_error("config write failed", &error);
-                                }
-                            }
-                        }
-                        KeyCode::Char('t') if state.active_tab == AppTab::Leaderboard => {
-                            cycle_leaderboard_time_period(&mut state.config);
-                            match state.config.write_to_path(&state.config_path) {
-                                Ok(()) => state.refresh_leaderboard = true,
-                                Err(error) => {
-                                    state.status_message =
-                                        format_status_error("config write failed", &error);
-                                }
-                            }
-                        }
-                        KeyCode::Char('o') if state.active_tab == AppTab::Leaderboard => {
-                            cycle_leaderboard_ordering(&mut state.config);
-                            match state.config.write_to_path(&state.config_path) {
-                                Ok(()) => state.refresh_leaderboard = true,
-                                Err(error) => {
-                                    state.status_message =
-                                        format_status_error("config write failed", &error);
-                                }
-                            }
-                        }
-                        KeyCode::Char('i') => {
-                            if let Some(context) = state.selected_context() {
-                                if let Err(error) =
-                                    inspect_context(&client, &mut state, context).await
-                                {
-                                    state.status_message =
-                                        format_status_error("wallet inspect failed", &error);
-                                }
-                            }
-                        }
-                        KeyCode::Char('a') if state.active_tab == AppTab::Leaderboard => {
-                            if let Some(SelectionContext::Leaderboard(index)) =
-                                state.selected_context()
-                            {
-                                add_leaderboard_wallet_to_watchlist(&mut state, index, false)?;
-                            }
-                        }
-                        KeyCode::Char('d') if state.active_tab == AppTab::Watchlist => {
-                            if let Some(SelectionContext::Watchlist(index)) =
-                                state.selected_context()
-                            {
-                                remove_watchlist_wallet(&mut state, index)?;
-                            }
-                        }
-                        KeyCode::Char('p') => {
-                            if let Some(context) = state.selected_context() {
-                                toggle_selected_paper_follow(&mut state, context)?;
-                            }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            menu.selected = move_index(menu.selected, menu.actions.len(), 1)
                         }
                         KeyCode::Enter => {
-                            if let Some(context) = state.selected_context() {
-                                state.action_menu = Some(build_action_menu(&state, context));
+                            let action = menu.actions.get(menu.selected).cloned();
+                            let context = menu.context.clone();
+                            state.action_menu = None;
+                            if let Some(action) = action
+                                && let Err(error) =
+                                    perform_action(&client, &mut state, context, action).await
+                            {
+                                state.status_message =
+                                    format_status_error("wallet action failed", &error);
                             }
                         }
                         _ => {}
                     }
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h') => {
+                        state.previous_tab();
+                    }
+                    KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => {
+                        state.next_tab();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
+                    KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
+                    KeyCode::Char('g') => state.jump_to_start(),
+                    KeyCode::Char('G') => state.jump_to_end(),
+                    KeyCode::Char('r') => {
+                        queue_refresh_for_active_tab(&mut state);
+                    }
+                    KeyCode::Char('c') if state.active_tab == AppTab::Leaderboard => {
+                        cycle_leaderboard_category(&mut state.config);
+                        match state.config.write_to_path(&state.config_path) {
+                            Ok(()) => state.refresh_leaderboard = true,
+                            Err(error) => {
+                                state.status_message =
+                                    format_status_error("config write failed", &error);
+                            }
+                        }
+                    }
+                    KeyCode::Char('t') if state.active_tab == AppTab::Leaderboard => {
+                        cycle_leaderboard_time_period(&mut state.config);
+                        match state.config.write_to_path(&state.config_path) {
+                            Ok(()) => state.refresh_leaderboard = true,
+                            Err(error) => {
+                                state.status_message =
+                                    format_status_error("config write failed", &error);
+                            }
+                        }
+                    }
+                    KeyCode::Char('o') if state.active_tab == AppTab::Leaderboard => {
+                        cycle_leaderboard_ordering(&mut state.config);
+                        match state.config.write_to_path(&state.config_path) {
+                            Ok(()) => state.refresh_leaderboard = true,
+                            Err(error) => {
+                                state.status_message =
+                                    format_status_error("config write failed", &error);
+                            }
+                        }
+                    }
+                    KeyCode::Char('i') => {
+                        if let Some(context) = state.selected_context()
+                            && let Err(error) = inspect_context(&client, &mut state, context).await
+                        {
+                            state.status_message =
+                                format_status_error("wallet inspect failed", &error);
+                        }
+                    }
+                    KeyCode::Char('a') if state.active_tab == AppTab::Leaderboard => {
+                        if let Some(SelectionContext::Leaderboard(index)) = state.selected_context()
+                        {
+                            add_leaderboard_wallet_to_watchlist(&mut state, index, false)?;
+                        }
+                    }
+                    KeyCode::Char('d') if state.active_tab == AppTab::Watchlist => {
+                        if let Some(SelectionContext::Watchlist(index)) = state.selected_context() {
+                            remove_watchlist_wallet(&mut state, index)?;
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(context) = state.selected_context() {
+                            toggle_selected_paper_follow(&mut state, context)?;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(context) = state.selected_context() {
+                            state.action_menu = Some(build_action_menu(&state, context));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -469,13 +482,33 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
         .iter()
         .map(|row| (row.config_index, row.clone()))
         .collect::<HashMap<_, _>>();
-    let mut rows = Vec::new();
+    let concurrency = state.config.http.max_concurrent_requests.max(1);
+    let mut outcomes = stream::iter(state.config.monitor.wallets.iter().cloned().enumerate())
+        .map(|(config_index, watched)| {
+            let config = &state.config;
+            async move {
+                let result = build_resolved_wallet_analysis(client, config, &watched.wallet).await;
+                WatchlistRefreshOutcome {
+                    config_index,
+                    watched,
+                    result,
+                }
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    outcomes.sort_by_key(|outcome| outcome.config_index);
+
+    let mut rows = Vec::with_capacity(outcomes.len());
     let mut stale_wallets = 0usize;
     let mut dropped_wallets = 0usize;
 
-    for (config_index, watched) in state.config.monitor.wallets.iter().enumerate() {
-        let resolved = match client.resolve_wallet_input(&watched.wallet).await {
-            Ok(resolved) => resolved,
+    for outcome in outcomes {
+        let config_index = outcome.config_index;
+        let watched = outcome.watched;
+        let ResolvedWalletAnalysis { resolved, analysis } = match outcome.result {
+            Ok(result) => result,
             Err(error) => {
                 if let Some(previous) = previous_rows.get(&config_index) {
                     let mut stale_row = previous.clone();
@@ -486,32 +519,12 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
                 }
                 dropped_wallets += 1;
                 state.status_message = format_status_error(
-                    &format!("wallet resolve failed for {}", watched.wallet),
+                    &format!("wallet refresh failed for {}", watched.wallet),
                     &error,
                 );
                 continue;
             }
         };
-        let analysis =
-            match build_wallet_analysis(client, &state.config, &resolved.wallet, None).await {
-                Ok(analysis) => analysis,
-                Err(error) => {
-                    if let Some(previous) = previous_rows.get(&config_index) {
-                        let mut stale_row = previous.clone();
-                        stale_row.wallet = resolved.wallet;
-                        stale_row.paper_follow_enabled = watched.paper_follow_enabled;
-                        rows.push(stale_row);
-                        stale_wallets += 1;
-                        continue;
-                    }
-                    dropped_wallets += 1;
-                    state.status_message = format_status_error(
-                        &format!("wallet refresh failed for {}", watched.wallet),
-                        &error,
-                    );
-                    continue;
-                }
-            };
         let label = watched
             .label
             .clone()
@@ -573,18 +586,17 @@ async fn refresh_watchlist(client: &PolymarketClient, state: &mut AppState) -> R
     };
     state.refresh_watchlist = false;
 
-    if let Some(detail) = &mut state.wallet_detail {
-        if let Some(row) = state
+    if let Some(detail) = &mut state.wallet_detail
+        && let Some(row) = state
             .watchlist_rows
             .iter()
             .find(|row| row.wallet == detail.wallet)
-        {
-            detail.label = row.label.clone();
-            detail.watched = true;
-            detail.paper_follow_enabled = row.paper_follow_enabled;
-            detail.analysis = row.analysis.clone();
-            detail.source = "Watchlist".to_owned();
-        }
+    {
+        detail.label = row.label.clone();
+        detail.watched = true;
+        detail.paper_follow_enabled = row.paper_follow_enabled;
+        detail.analysis = row.analysis.clone();
+        detail.source = "Watchlist".to_owned();
     }
 
     Ok(())
@@ -607,11 +619,35 @@ async fn refresh_leaderboard(client: &PolymarketClient, state: &mut AppState) ->
         .map(|row| (row.wallet.clone(), row.paper_follow_enabled))
         .collect::<HashMap<_, _>>();
 
-    let mut rows = Vec::with_capacity(leaderboard.len());
-    for entry in leaderboard {
-        let wallet = entry.proxy_wallet.to_ascii_lowercase();
-        let report =
-            build_wallet_report(client, &state.config, &wallet, Some(entry.clone())).await?;
+    let concurrency = state.config.http.max_concurrent_requests.max(1);
+    let mut outcomes = stream::iter(leaderboard.into_iter().enumerate())
+        .map(|(index, entry)| {
+            let config = &state.config;
+            async move {
+                let wallet = entry.proxy_wallet.to_ascii_lowercase();
+                let report =
+                    build_wallet_report(client, config, &wallet, Some(entry.clone())).await?;
+                Ok::<_, anyhow::Error>(LeaderboardRefreshOutcome {
+                    index,
+                    entry,
+                    wallet,
+                    report,
+                })
+            }
+        })
+        .buffer_unordered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
+    outcomes.sort_by_key(|outcome| outcome.index);
+
+    let mut rows = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        let LeaderboardRefreshOutcome {
+            entry,
+            wallet,
+            report,
+            ..
+        } = outcome;
         let label = entry
             .user_name
             .clone()
